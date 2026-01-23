@@ -12,7 +12,7 @@ nav:
   - User Guide:
     - Quick Start: user-guide/quickstart.md
     - Performance: user-guide/performance.md
-  - Examples: 
+  - Examples:
     - Gallery Overview: examples/index.md
     - Basic Regridding: examples/basic-regridding.md
     - Conservative Regridding: examples/conservative-regridding.md

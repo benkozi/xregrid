@@ -37,11 +37,11 @@ The example creates a synthetic unstructured grid using a Fibonacci sphere patte
 def fibonacci_sphere(n_points):
     """Generate approximately uniform points on a sphere"""
     golden_angle = np.pi * (3 - np.sqrt(5))  # Golden angle
-    
+
     i = np.arange(0, n_points, dtype=float) + 0.5
     lat = np.arcsin(1 - 2 * i / n_points)
     lon = (i * golden_angle) % (2 * np.pi)
-    
+
     return np.degrees(lon), np.degrees(lat)
 
 # Create ~10,000 point unstructured grid
@@ -88,14 +88,14 @@ The example demonstrates how to visualize unstructured data:
 ### Scatter Plots for Unstructured Data
 ```python
 # Original unstructured data
-plt.scatter(unstructured_lons, unstructured_lats, 
+plt.scatter(unstructured_lons, unstructured_lats,
            c=temperature_data, s=1, cmap='RdYlBu_r')
 ```
 
 ### Regular Grids for Structured Data
 ```python
 # Regridded structured data
-plt.pcolormesh(target_lons, target_lats, 
+plt.pcolormesh(target_lons, target_lats,
               temp_regridded, shading='auto')
 ```
 

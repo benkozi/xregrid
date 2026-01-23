@@ -36,7 +36,7 @@ target_grid = xr.Dataset({
 
 # Create regridder
 regridder = ESMPyRegridder(
-    source_grid, target_grid, 
+    source_grid, target_grid,
     method='bilinear',
     periodic=True
 )

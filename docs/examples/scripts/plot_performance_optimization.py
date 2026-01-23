@@ -3,7 +3,7 @@ Weight Reuse and Performance Optimization
 =========================================
 
 This example demonstrates the most important performance optimization in XRegrid:
-weight reuse. By saving and reloading regridding weights, you can achieve 
+weight reuse. By saving and reloading regridding weights, you can achieve
 massive speedups when regridding multiple datasets with the same grids.
 
 This is particularly important for:
@@ -60,41 +60,41 @@ print(f"Grid size ratio: {len(source_lats)*len(source_lons) / (len(target_lats)*
 # Create synthetic climate data with realistic patterns
 def create_climate_data(lats, lons, n_time_steps=24):
     """Create realistic climate data (temperature) with temporal evolution"""
-    
+
     # Create 2D coordinate arrays
     lons_2d, lats_2d = np.meshgrid(lons, lats)
-    
+
     # Base temperature pattern
     # - Strong latitudinal gradient
     # - Land-ocean contrasts
     # - Topographic effects
     base_temp = 15 + 25 * np.cos(np.radians(lats_2d))
-    
+
     # Add continental effects (simplified)
     continental = np.zeros_like(lons_2d)
     # Eurasia
     continental += -8 * np.exp(-((lons_2d - 90)**2/3000 + (lats_2d - 60)**2/500))
-    # North America  
+    # North America
     continental += -6 * np.exp(-((lons_2d - 260)**2/2000 + (lats_2d - 50)**2/400))
-    
+
     # Create time series (2 years of monthly data)
     time_data = np.zeros((n_time_steps, len(lats), len(lons)))
-    
+
     for t in range(n_time_steps):
         # Seasonal cycle (stronger in NH)
         month = t % 12
         seasonal = 15 * np.cos(2 * np.pi * (month - 6) / 12) * np.maximum(0, lats_2d / 90)
-        
+
         # Interannual variability
         year = t // 12
         interannual = 2 * np.sin(2 * np.pi * year / 5) * np.exp(-(lats_2d**2 / 2000))
-        
+
         # Weather noise
         np.random.seed(42 + t)  # Different but reproducible for each time
         weather_noise = np.random.normal(0, 3, lats_2d.shape)
-        
+
         time_data[t] = base_temp + continental + seasonal + interannual + weather_noise
-    
+
     return time_data
 
 # Create sample dataset
@@ -146,7 +146,7 @@ print("=" * 50)
 start_time = time.time()
 regridder_load = ESMPyRegridder(
     source_grid, target_grid,
-    method='bilinear', 
+    method='bilinear',
     periodic=True,
     reuse_weights=True,
     filename=weight_file
@@ -194,7 +194,7 @@ input_size_mb = dataset.temperature.nbytes / 1024**2
 output_size_mb = full_result.nbytes / 1024**2
 
 print(f"Input data size: {input_size_mb:.1f} MB")
-print(f"Output data size: {output_size_mb:.1f} MB") 
+print(f"Output data size: {output_size_mb:.1f} MB")
 print(f"Memory expansion: {output_size_mb / input_size_mb:.1f}x")
 
 # Workflow comparison
@@ -206,7 +206,7 @@ def workflow_without_reuse(data):
     """Simulate processing without weight reuse (BAD practice)"""
     total_time = 0
     results = []
-    
+
     for t in range(len(data.time)):
         start = time.time()
         # Create new regridder each time (inefficient!)
@@ -218,7 +218,7 @@ def workflow_without_reuse(data):
         result = temp_regridder(data.isel(time=t))
         total_time += time.time() - start
         results.append(result)
-    
+
     return results, total_time
 
 def workflow_with_reuse(data, regridder):
@@ -234,7 +234,7 @@ test_data = dataset.temperature.isel(time=slice(0, 6))  # 6 months
 print("Testing workflow without weight reuse (6 time steps)...")
 results_bad, time_bad = workflow_without_reuse(test_data)
 
-print("Testing workflow with weight reuse (6 time steps)...")  
+print("Testing workflow with weight reuse (6 time steps)...")
 result_good, time_good = workflow_with_reuse(test_data, regridder_load)
 
 print(f"\nWorkflow comparison:")
@@ -276,7 +276,7 @@ axes[0, 1].set_title('Memory Usage')
 workflow_methods = ['Without\nReuse', 'With\nReuse']
 workflow_times = [time_bad, time_good]
 
-bars2 = axes[0, 2].bar(workflow_methods, workflow_times, 
+bars2 = axes[0, 2].bar(workflow_methods, workflow_times,
                        color=['red', 'green'])
 axes[0, 2].set_ylabel('Time (seconds)')
 axes[0, 2].set_title('Workflow Comparison (6 time steps)')
@@ -301,7 +301,7 @@ im2 = axes[1, 1].pcolormesh(
     shading='auto', cmap='RdYlBu_r'
 )
 axes[1, 1].set_title('Regridded 1° Data (January)')
-axes[1, 1].set_xlabel('Longitude') 
+axes[1, 1].set_xlabel('Longitude')
 axes[1, 1].set_ylabel('Latitude')
 plt.colorbar(im2, ax=axes[1, 1], label='Temperature (°C)')
 

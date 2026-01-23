@@ -6,7 +6,7 @@ This example demonstrates conservative regridding, which is essential for flux q
 
 Conservative regridding ensures that the total integral of the field is preserved during interpolation, making it ideal for:
 - Precipitation rates
-- Radiation fluxes  
+- Radiation fluxes
 - Heat fluxes
 - Any extensive quantity
 
@@ -23,7 +23,7 @@ from xregrid import ESMPyRegridder
 
 # Conservative regridder (preserves total precipitation)
 regridder_conservative = ESMPyRegridder(
-    source_grid, target_grid, 
+    source_grid, target_grid,
     method='conservative',
     periodic=True
 )
@@ -31,7 +31,7 @@ regridder_conservative = ESMPyRegridder(
 # Bilinear regridder (for comparison)
 regridder_bilinear = ESMPyRegridder(
     source_grid, target_grid,
-    method='bilinear', 
+    method='bilinear',
     periodic=True
 )
 ```

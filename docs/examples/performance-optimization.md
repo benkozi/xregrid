@@ -7,7 +7,7 @@ This example demonstrates the most important performance optimization in XRegrid
 Weight reuse is critical for:
 - **Processing time series of data**
 - **Operational forecast systems**
-- **Climate data analysis workflows** 
+- **Climate data analysis workflows**
 - **Any repeated regridding operations**
 
 ## Performance Impact
@@ -46,7 +46,7 @@ regridder = ESMPyRegridder(
 regridder = ESMPyRegridder(
     source_grid, target_grid,
     method='bilinear',
-    reuse_weights=True, 
+    reuse_weights=True,
     filename='global_025deg_to_1deg_weights.nc'
 )
 ```
@@ -76,7 +76,7 @@ result = regridder(data)  # Process all time steps together
 
 ### Test Configuration
 - **Source**: 0.25° global grid (721×1440)
-- **Target**: 1° global grid (181×360) 
+- **Target**: 1° global grid (181×360)
 - **Data**: 24 time steps (2 years monthly)
 - **Size**: Input 5.9 MB → Output 23.7 MB
 
@@ -84,7 +84,7 @@ result = regridder(data)  # Process all time steps together
 
 ```
 Weight generation time: 45.23 seconds
-Weight loading time: 1.12 seconds  
+Weight loading time: 1.12 seconds
 Single regridding time: 0.046 seconds
 Full series regridding: 1.08 seconds
 Vectorization speedup: 1.02x (per time step)
@@ -143,7 +143,7 @@ regridder = ESMPyRegridder(
 for file in files:
     ds = xr.open_dataset(file)
     ds_regridded = regridder(ds.temperature)
-    
+
     output_file = file.replace('.nc', '_regridded.nc')
     ds_regridded.to_netcdf(output_file)
 ```

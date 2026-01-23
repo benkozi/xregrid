@@ -1,0 +1,18 @@
+name: xregrid-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - esmpy
+  - xesmf
+  - xarray
+  - numpy
+  - scipy
+  - dask
+  - netcdf4
+  - pandas
+  - pytest
+  - pip
+  - pip:
+    - -e .

@@ -82,8 +82,8 @@ temperature = xr.DataArray(
 # Create the regridder
 print("Creating regridder...")
 regridder = ESMPyRegridder(
-    source_grid, 
-    target_grid, 
+    source_grid,
+    target_grid,
     method='bilinear',
     periodic=True  # Important for global grids!
 )
