@@ -14,20 +14,24 @@ from xregrid import ESMPyRegridder
 
 ### 2. Create or Load Grids
 
-XRegrid works with xarray datasets that contain latitude and longitude coordinates.
+XRegrid works with xarray datasets that contain latitude and longitude coordinates. You can also use the built-in utilities to quickly create standard grids.
 
 ```python
-# Create a coarse source grid (1° resolution)
-source_grid = xr.Dataset({
-    'lat': (['lat'], np.linspace(-90, 90, 180)),
-    'lon': (['lon'], np.linspace(0, 359, 360))
-})
+from xregrid import create_global_grid, create_regional_grid
 
-# Create a finer target grid (0.5° resolution)
-target_grid = xr.Dataset({
-    'lat': (['lat'], np.linspace(-90, 90, 360)),
-    'lon': (['lon'], np.linspace(0, 359.5, 720))
-})
+# Create a 1° global source grid
+source_grid = create_global_grid(res_lat=1.0, res_lon=1.0)
+
+# Create a 0.5° global target grid
+target_grid = create_global_grid(res_lat=0.5, res_lon=0.5)
+
+# Or create a regional grid
+regional_grid = create_regional_grid(
+    lat_range=(35, 70),
+    lon_range=(-10, 40),
+    res_lat=0.25,
+    res_lon=0.25
+)
 ```
 
 ### 3. Initialize the Regridder
@@ -252,7 +256,7 @@ for file in files:
 ### Common Errors
 
 **"Grid coordinates not found"**
-- Ensure your dataset has 'lat' and 'lon' variables
+- Ensure your dataset has 'lat' and 'lon' variables, or follow CF-conventions (XRegrid will automatically detect them via `cf-xarray`)
 - Check coordinate names and dimensions
 
 **"Regridding failed"**
@@ -260,7 +264,8 @@ for file in files:
 - Check for invalid coordinates (NaN, inf)
 - Try a different regridding method
 
-**Slow performance**
+**Slow performance or Memory errors**
 - Use `periodic=True` for global grids
-- Enable weight reuse for repeated operations
-- Consider chunking large datasets with Dask
+- Enable weight reuse for repeated operations (`reuse_weights=True`)
+- Consider chunking large datasets with Dask to manage memory
+- Process time series together for better vectorization

@@ -13,25 +13,20 @@ XRegrid is a high-performance regridding library that builds on top of ESMF (Ear
 - **Dask Integration**: Seamless parallel processing with Dask arrays
 - **Memory Efficient**: Optimized sparse matrix operations using scipy
 - **xarray Compatible**: Native support for xarray datasets and data arrays
+- **Automatic coordinate detection**: Support for `cf-xarray` for easy coordinate and boundary identification
 - **Weight Reuse**: Save and load regridding weights to/from NetCDF files
+- **Grid Utilities**: Built-in functions for quick global and regional grid generation
 
 ## Quick Example
 
 ```python
 import xarray as xr
 import numpy as np
-from xregrid import ESMPyRegridder
+from xregrid import ESMPyRegridder, create_global_grid
 
 # Create source and target grids
-source_grid = xr.Dataset({
-    'lat': (['lat'], np.linspace(-90, 90, 180)),
-    'lon': (['lon'], np.linspace(0, 359, 360))
-})
-
-target_grid = xr.Dataset({
-    'lat': (['lat'], np.linspace(-90, 90, 360)),
-    'lon': (['lon'], np.linspace(0, 359.5, 720))
-})
+source_grid = create_global_grid(res_lat=1.0, res_lon=1.0)
+target_grid = create_global_grid(res_lat=0.5, res_lon=0.5)
 
 # Create regridder
 regridder = ESMPyRegridder(
@@ -60,11 +55,11 @@ temperature_regridded = regridder(temperature)
 
 ## Installation
 
-Install via conda (recommended):
+Install via mamba (recommended):
 
 ```bash
-conda env create -f environment.yml
-conda activate xregrid
+mamba env create -f environment.yml
+mamba activate xregrid
 ```
 
 Or install from source:
@@ -75,26 +70,11 @@ pip install .
 
 See the [Installation Guide](installation.md) for detailed instructions.
 
-## Getting Started
-
-- [Quick Start Guide](user-guide/quickstart.md) - Learn the basics
-- [Examples Gallery](examples/index.md) - See XRegrid in action
-- [Performance Guide](user-guide/performance.md) - Optimization tips
-- [API Reference](api/regridder.md) - Complete API documentation
-
 ## Why XRegrid?
 
 XRegrid was developed to address performance bottlenecks in existing regridding solutions for high-resolution climate data. By leveraging optimized sparse matrix operations and proper ESMF integration, XRegrid provides:
 
-1. **Vectorized Operations**: Single large sparse matrix multiplications instead of loop-based approaches
+1. **Vectorized Operations**: Single large sparse matrix-matrix multiplications instead of loop-based approaches
 2. **Optimized Memory Usage**: scipy sparse matrices with lower memory footprint
 3. **Correct ESMF Integration**: Proper coordinate transposition and index alignment
 4. **Dask Scalability**: Linear scaling with the number of chunks
-
-## Contributing
-
-We welcome contributions! Please see our contributing guidelines and feel free to submit issues or pull requests.
-
-## License
-
-XRegrid is released under the MIT License.
