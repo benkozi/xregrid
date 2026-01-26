@@ -4,10 +4,14 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import cf_xarray  # noqa: F401
-import esmpy
 import numpy as np
 import xarray as xr
 from scipy.sparse import coo_matrix
+
+try:
+    import esmpy
+except ImportError:
+    esmpy = None
 
 from .utils import update_history
 
@@ -88,6 +92,12 @@ class Regridder:
         extrap_dist_exponent : float, default 2.0
             Exponent for IDW extrapolation.
         """
+        if esmpy is None:
+            raise ImportError(
+                "ESMPy is required for Regridder. "
+                "Please install it via conda: `conda install -c conda-forge esmpy`"
+            )
+
         # Initialize ESMF Manager (required for some environments)
         if mpi:
             self._manager = esmpy.Manager(logkind=esmpy.LogKind.MULTI, debug=False)
@@ -329,6 +339,14 @@ class Regridder:
                     lon_b = ds["lon_b"]
 
             has_bounds = lat_b is not None and lon_b is not None
+
+            if self.method == "conservative" and not has_bounds:
+                raise ValueError(
+                    f"Conservative regridding requires cell boundaries (bounds) for "
+                    f"{'source' if is_source else 'target'} grid. "
+                    "Ensure your dataset has 'lat_b' and 'lon_b' or CF-compliant bounds."
+                )
+
             staggerlocs = [esmpy.StaggerLoc.CENTER]
             if has_bounds:
                 staggerlocs.append(esmpy.StaggerLoc.CORNER)
