@@ -18,7 +18,7 @@ def test_mpi_initialization():
         import esmpy
 
         _ = Regridder(source_grid, target_grid, mpi=True)
-        mock_manager.assert_called_with(logkind=esmpy.LogKind.MULTI, debug=False)
+        mock_manager.assert_called_with(debug=False)
 
 
 def test_mpi_weight_gathering():

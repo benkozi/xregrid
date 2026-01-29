@@ -101,7 +101,7 @@ class Regridder:
 
         # Initialize ESMF Manager (required for some environments)
         if mpi:
-            self._manager = esmpy.Manager(logkind=esmpy.LogKind.MULTI, debug=False)
+            self._manager = esmpy.Manager(debug=False)
         else:
             self._manager = esmpy.Manager(debug=False)
 
@@ -238,6 +238,8 @@ class Regridder:
 
         if lat.ndim == 2:
             # Curvilinear
+            if lon.ndim == 2 and lon.dims != lat.dims and set(lon.dims) == set(lat.dims):
+                 lon = lon.transpose(*lat.dims)
             return lon, lat, lat.shape, lat.dims, False
         elif lat.ndim == 1:
             if lat.dims == lon.dims:
@@ -245,10 +247,14 @@ class Regridder:
                 return lon, lat, lat.shape, lat.dims, True
             else:
                 # Rectilinear
-                # Use xarray's broadcasting to create the meshgrid lazily
-                # if they are dask-backed.
                 lon_mesh, lat_mesh = xr.broadcast(lon, lat)
+
                 # Ensure they have the correct order (lat, lon) for the shape
+                # Check if lon needs transpose to match lat's dimension order if both are 2D
+                if lat.ndim == 2 and lon.ndim == 2:
+                     if lat.dims != lon.dims and set(lat.dims) == set(lon.dims):
+                          lon = lon.transpose(*lat.dims)
+
                 lon_mesh = lon_mesh.transpose(lat.dims[0], lon.dims[0])
                 lat_mesh = lat_mesh.transpose(lat.dims[0], lon.dims[0])
 
@@ -470,8 +476,17 @@ class Regridder:
         src_field = esmpy.Field(src_obj, name="src")
         dst_field = esmpy.Field(dst_obj, name="dst")
 
+        try:
+            regrid_method = self.method_map[self.method]
+        except KeyError:
+            available_methods = ", ".join(self.method_map.keys())
+            raise ValueError(
+                f"Method '{self.method}' is not supported. "
+                f"Available methods are: {available_methods}"
+            )
+
         regrid_kwargs = {
-            "regrid_method": self.method_map[self.method],
+            "regrid_method": regrid_method,
             "unmapped_action": esmpy.UnmappedAction.IGNORE,
             "factors": True,
         }
