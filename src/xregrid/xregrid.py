@@ -1448,10 +1448,13 @@ class Regridder:
             raise TypeError("Input must be an xarray.DataArray or xarray.Dataset.")
 
     def _regrid_dataarray(
-        self, da_in: xr.DataArray, update_history_attr: bool = True
+        self,
+        da_in: xr.DataArray,
+        update_history_attr: bool = True,
+        _processed_coords: Optional[set[str]] = None,
     ) -> xr.DataArray:
         """
-        Regrid a single DataArray.
+        Regrid a single DataArray, including auxiliary spatial coordinates.
 
         Parameters
         ----------
@@ -1459,12 +1462,37 @@ class Regridder:
             The input DataArray.
         update_history_attr : bool, default True
             Whether to update the history attribute.
+        _processed_coords : set of str, optional
+            Set of coordinate names already being processed to avoid infinite recursion.
 
         Returns
         -------
         xr.DataArray
             The regridded DataArray.
         """
+        if _processed_coords is None:
+            _processed_coords = set()
+
+        # Identify auxiliary coordinates that need regridding (Aero Protocol: Scientific Hygiene)
+        aux_coords_to_regrid = {}
+
+        # Track this DataArray to prevent mutual recursion
+        if da_in.name:
+            _processed_coords.add(da_in.name)
+
+        for c_name, c_da in da_in.coords.items():
+            # Avoid infinite recursion
+            if c_name in _processed_coords:
+                continue
+
+            if c_name not in da_in.dims and all(
+                d in c_da.dims for d in self._dims_source
+            ):
+                # This is an auxiliary spatial coordinate
+                aux_coords_to_regrid[c_name] = self._regrid_dataarray(
+                    c_da, update_history_attr=False, _processed_coords=_processed_coords
+                )
+
         # CF-Awareness: Map logical dimensions to physical dimension names in da_in
         # (Aero Protocol: Flexibility)
 
@@ -1594,6 +1622,10 @@ class Regridder:
             }
         )
 
+        # Re-attach regridded auxiliary coordinates
+        if aux_coords_to_regrid:
+            out = out.assign_coords(aux_coords_to_regrid)
+
         # Update history for provenance
         if update_history_attr:
             esmpy_version = getattr(esmpy, "__version__", "unknown")
@@ -1616,7 +1648,7 @@ class Regridder:
 
     def _regrid_dataset(self, ds_in: xr.Dataset) -> xr.Dataset:
         """
-        Regrid all data variables in a Dataset.
+        Regrid all data variables and auxiliary coordinates in a Dataset.
 
         Parameters
         ----------
@@ -1628,7 +1660,9 @@ class Regridder:
         xr.Dataset
             The regridded Dataset.
         """
-        regridded_vars = {}
+        regridded_items: dict[str, Union[xr.DataArray, Any]] = {}
+
+        # 1. Regrid data variables
         for name, da in ds_in.data_vars.items():
             # CF-Awareness: Check for spatial dimensions using logical axes (Aero Protocol)
             is_regriddable = False
@@ -1646,20 +1680,37 @@ class Regridder:
                     pass
 
             if is_regriddable:
-                regridded_vars[name] = self._regrid_dataarray(
-                    da, update_history_attr=False
+                # Initialize _processed_coords with the name of the current variable
+                # to prevent it from trying to regrid itself if it appears as a coordinate.
+                regridded_items[name] = self._regrid_dataarray(
+                    da, update_history_attr=False, _processed_coords={name}
                 )
             else:
-                regridded_vars[name] = da
+                regridded_items[name] = da
 
-        out = xr.Dataset(regridded_vars, attrs=ds_in.attrs)
+        out = xr.Dataset(regridded_items, attrs=ds_in.attrs)
 
-        # Scientific Hygiene: Preserve coordinates that are not spatial dimensions (Aero Protocol)
+        # 2. Scientific Hygiene: Regrid auxiliary spatial coordinates and preserve others (Aero Protocol)
         # and ensure grid_mapping from target grid is attached.
         for c in ds_in.coords:
-            if c not in out.coords and not any(
-                d in self._dims_source for d in ds_in.coords[c].dims
-            ):
+            if c in out.coords:
+                continue
+
+            # Check if this coordinate depends on spatial dimensions
+            if all(d in ds_in.coords[c].dims for d in self._dims_source):
+                # If it's not a dimension coordinate, regrid it
+                if c not in ds_in.dims:
+                    out = out.assign_coords(
+                        {
+                            c: self._regrid_dataarray(
+                                ds_in.coords[c],
+                                update_history_attr=False,
+                                _processed_coords={c},
+                            )
+                        }
+                    )
+            else:
+                # Not dependent on spatial dims, just preserve it
                 out = out.assign_coords({c: ds_in.coords[c]})
 
         # Attach scalar coordinates from target grid (e.g., grid_mapping)
