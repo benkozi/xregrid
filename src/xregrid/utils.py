@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime
-from typing import Tuple, Union
+import os
+import socket
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import pyproj
@@ -127,6 +129,9 @@ def load_esmf_file(filepath: str) -> xr.Dataset:
     """
     Load an ESMF mesh, mosaic, or grid file into an xarray Dataset.
 
+    Automatically recognizes SCRIP/ESMF standard variable names and renames
+    them to 'lat', 'lon', 'lat_b', 'lon_b' while adding CF attributes.
+
     Parameters
     ----------
     filepath : str
@@ -137,11 +142,45 @@ def load_esmf_file(filepath: str) -> xr.Dataset:
     xr.Dataset
         The dataset representation of the ESMF file.
     """
-    # This is a basic implementation using xarray to open NetCDF files
-    # which many ESMF files are.
     ds = xr.open_dataset(filepath)
 
-    update_history(ds, f"Loaded ESMF file from {filepath}.")
+    # Recognize SCRIP/ESMF standard names
+    rename_map = {
+        "grid_center_lat": "lat",
+        "grid_center_lon": "lon",
+        "grid_corner_lat": "lat_b",
+        "grid_corner_lon": "lon_b",
+        "grid_imask": "mask",
+    }
+
+    found_renames = {k: v for k, v in rename_map.items() if k in ds}
+
+    if found_renames:
+        ds = ds.rename(found_renames)
+        message = f"Loaded ESMF file and renamed standard variables: {found_renames}"
+    else:
+        message = f"Loaded ESMF file from {filepath}."
+
+    # Add CF attributes if missing for better cf-xarray discovery
+    if "lat" in ds:
+        if "units" not in ds["lat"].attrs:
+            ds["lat"].attrs["units"] = "degrees_north"
+        if "standard_name" not in ds["lat"].attrs:
+            ds["lat"].attrs["standard_name"] = "latitude"
+
+    if "lon" in ds:
+        if "units" not in ds["lon"].attrs:
+            ds["lon"].attrs["units"] = "degrees_east"
+        if "standard_name" not in ds["lon"].attrs:
+            ds["lon"].attrs["standard_name"] = "longitude"
+
+    # Link bounds if present
+    if "lat" in ds and "lat_b" in ds:
+        ds["lat"].attrs["bounds"] = "lat_b"
+    if "lon" in ds and "lon_b" in ds:
+        ds["lon"].attrs["bounds"] = "lon_b"
+
+    update_history(ds, message)
 
     return ds
 
@@ -313,3 +352,114 @@ def create_mesh_from_coords(
     update_history(ds, f"Created mesh from coordinates and CRS {crs} using xregrid.")
 
     return ds
+
+
+def get_rdhpcs_cluster(
+    machine: Optional[str] = None,
+    account: Optional[str] = None,
+    **kwargs,
+):
+    """
+    Create a dask-jobqueue SLURMCluster for NOAA RDHPCS systems.
+
+    This helper automatically detects the machine if not provided and sets up
+    reasonable defaults for Hera, Jet, and Gaea.
+
+    Parameters
+    ----------
+    machine : str, optional
+        Machine name ('hera', 'jet', 'gaea-c5', 'gaea-c6', 'ursa').
+        If None, attempts to detect based on hostname.
+    account : str, optional
+        SLURM account/project for charging.
+    **kwargs
+        Additional keyword arguments passed to SLURMCluster.
+
+    Returns
+    -------
+    dask_jobqueue.SLURMCluster
+        The configured cluster object.
+    """
+    try:
+        from dask_jobqueue import SLURMCluster
+    except ImportError:
+        raise ImportError(
+            "dask-jobqueue is required for get_rdhpcs_cluster. "
+            "Install it with `pip install dask-jobqueue`."
+        )
+
+    hostname = socket.gethostname()
+    if machine is None:
+        if "ufe" in hostname or "ursa" in hostname:
+            machine = "ursa"
+        elif "hfe" in hostname or "heralogin" in hostname:
+            machine = "hera"
+        elif "fe" in hostname and "jet" in hostname:
+            machine = "jet"
+        elif "gaea" in hostname:
+            # Hard to distinguish c5/c6 from hostname alone usually
+            machine = "gaea-c5"
+        else:
+            raise ValueError(
+                f"Could not detect NOAA RDHPCS machine from hostname '{hostname}'. "
+                "Please specify 'machine' explicitly."
+            )
+
+    defaults = {
+        "account": account or os.environ.get("SACCOUNT"),
+        "walltime": "01:00:00",
+    }
+
+    if machine == "hera":
+        defaults.update(
+            {
+                "queue": "hera",
+                "cores": 40,
+                "processes": 40,
+                "memory": "160GB",
+                "job_extra_directives": ["--exclusive"],
+            }
+        )
+    elif machine == "jet":
+        defaults.update(
+            {
+                "queue": "batch",
+                "cores": 24,
+                "processes": 12,
+                "memory": "120GB",
+            }
+        )
+    elif machine.startswith("gaea"):
+        cluster_ver = machine.split("-")[-1] if "-" in machine else "c5"
+        cores = 128 if cluster_ver == "c5" else 192
+        defaults.update(
+            {
+                "queue": "batch",
+                "cores": cores,
+                "processes": 16,
+                "memory": "256GB" if cluster_ver == "c5" else "384GB",
+                "job_extra_directives": [f"-M {cluster_ver}"],
+            }
+        )
+    elif machine == "ursa":
+        defaults.update(
+            {
+                "queue": "u1-compute",
+                "cores": 192,
+                "processes": 32,
+                "memory": "384GB",
+                "job_extra_directives": ["--exclusive"],
+            }
+        )
+
+    # Override defaults with user kwargs
+    defaults.update(kwargs)
+
+    if defaults["account"] is None:
+        import warnings
+
+        warnings.warn(
+            "No SLURM account specified. Please provide 'account' or set SACCOUNT environment variable."
+        )
+
+    return SLURMCluster(**defaults)

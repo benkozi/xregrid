@@ -23,6 +23,9 @@ dependencies = [
 test = [
     "pytest",
     "pytest-benchmark",
+    "pytest-mock",
+    "pooch",
+    "pre-commit",
 ]
 viz = [
     "matplotlib",
@@ -33,6 +36,7 @@ viz = [
 full = [
     "xregrid[test,viz]",
     "xesmf",
+    "uxarray",
 ]
 
 [tool.setuptools.packages.find]

@@ -8,14 +8,35 @@ XRegrid is a high-performance regridding library that builds on top of ESMF (Ear
 
 ## Key Features
 
-- **High Performance**: Up to 35x faster than xESMF for single time-step regridding
-- **Correct ESMF Integration**: Native support for rectilinear and curvilinear grids
-- **Dask Integration**: Seamless parallel processing with Dask arrays
-- **Memory Efficient**: Optimized sparse matrix operations using scipy
-- **xarray Compatible**: Native support for xarray datasets and data arrays
-- **Automatic coordinate detection**: Support for `cf-xarray` for easy coordinate and boundary identification
-- **Weight Reuse**: Save and load regridding weights to/from NetCDF files
-- **Grid Utilities**: Built-in functions for quick global and regional grid generation
+- **High Performance**: Up to 35x faster than xESMF for single time-step regridding.
+- **Correct ESMF Integration**: Native support for rectilinear, curvilinear, and unstructured grids.
+- **Unstructured Support**: Automatic handling of MPAS and UGRID datasets, including **conservative regridding** via mesh triangulation.
+- **Dask Integration**: Seamless parallel processing with Dask arrays, including **parallel weight generation** for all grid types.
+- **NOAA RDHPCS Support**: Built-in helpers for Hera, Jet, Gaea, and Ursa via `dask-jobqueue`.
+- **Memory Efficient**: Optimized sparse matrix operations using scipy.
+- **xarray Compatible**: Native support for xarray datasets and data arrays.
+- **Automatic coordinate detection**: Support for `cf-xarray` for easy coordinate and boundary identification.
+- **Weight Reuse**: Save and load regridding weights to/from NetCDF files.
+- **Grid Utilities**: Built-in functions for quick global and regional grid generation.
+
+## Why XRegrid?
+
+While `ESMPy` provides the powerful underlying engine for regridding, it is a low-level library that requires significant boilerplate code to use with `xarray`. `XRegrid` bridges this gap by providing:
+
+1.  **High-level API**: Use `xarray.Dataset` and `xarray.DataArray` directly without manual grid or field creation.
+2.  **Performance**: Optimized sparse matrix application that is up to 35x faster than other ESMF-based wrappers.
+3.  **Correctness**: Automatic handling of coordinate transpositions, periodicity, and metadata.
+
+### XRegrid vs. Raw ESMPy
+
+To regrid a single field, `ESMPy` requires manually creating grids, fields, and handling coordinate pointers. `XRegrid` abstracts this entire process into two lines of code.
+
+| Feature | ESMPy | XRegrid |
+|---------|-------|---------|
+| Grid Definition | Manual `esmpy.Grid` | Native `xarray.Dataset` |
+| Coordinate Handling | Manual pointer filling | Automatic detection |
+| Data Interface | NumPy-only | Xarray (NumPy & Dask) |
+| Code Complexity | ~30-50 lines | 2 lines |
 
 ## Quick Example
 
@@ -37,6 +58,24 @@ target_grid = xr.Dataset({
 regridder = Regridder(ds, target_grid, method='bilinear')
 air_regridded = regridder(ds.air)
 ```
+
+## High Performance Computing (HPC)
+
+XRegrid is designed for use on large HPC systems. It includes dedicated support for NOAA's RDHPCS machines (Hera, Jet, Gaea, Ursa) using `dask-jobqueue`.
+
+```python
+from xregrid.utils import get_rdhpcs_cluster
+from distributed import Client
+
+# Automatically detect machine (e.g., Hera) and setup cluster
+cluster = get_rdhpcs_cluster(account="your_account")
+cluster.scale(jobs=4)
+client = Client(cluster)
+
+# Regridding operations will now be distributed across the cluster
+```
+
+See [slurm/dask_jobqueue_examples.py](slurm/dask_jobqueue_examples.py) for more examples.
 
 ## Installation
 

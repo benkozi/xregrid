@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+import warnings
+from typing import TYPE_CHECKING, Any, Optional
 
 import xarray as xr
+
+if TYPE_CHECKING:
+    from .xregrid import Regridder
 
 try:
     import matplotlib.pyplot as plt
@@ -21,8 +25,10 @@ except ImportError:
 
 try:
     import hvplot.xarray  # noqa: F401
+    import holoviews as hv
 except ImportError:
     hvplot = None
+    hv = None
 else:
     hvplot = True
 
@@ -31,7 +37,7 @@ def plot_static(
     da: xr.DataArray,
     projection: Any = None,
     transform: Any = None,
-    title: str = "Static Map",
+    title: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -45,15 +51,20 @@ def plot_static(
         The projection to use for the axes. Defaults to ccrs.PlateCarree() if cartopy is available.
     transform : cartopy.crs.Projection, optional
         The transform to use for the plot call. Defaults to ccrs.PlateCarree() if cartopy is available.
-    title : str, default 'Static Map'
+    title : str, optional
         The plot title.
     **kwargs : Any
         Additional arguments passed to da.plot().
 
     Returns
     -------
-    matplotlib.collections.QuadMesh or similar
-        The plot object.
+    Any
+        The plot object (e.g., matplotlib QuadMesh or FacetGrid).
+
+    Raises
+    ------
+    ImportError
+        If matplotlib is not installed.
     """
     if plt is None:
         raise ImportError(
@@ -69,39 +80,54 @@ def plot_static(
         return im
 
     if transform is None and ccrs is not None:
-        # Try to detect CRS from attributes (Aero Protocol)
-        crs_wkt = da.attrs.get("crs") or da.attrs.get("grid_mapping")
-        # Check encoding as well
-        if crs_wkt is None:
-            crs_wkt = da.encoding.get("crs") or da.encoding.get("grid_mapping")
+        # Try to detect CRS from attributes and encoding (Aero Protocol: Scientific Hygiene)
+        # We prioritize 'grid_mapping' then 'crs'
+        crs_info = (
+            da.attrs.get("grid_mapping")
+            or da.encoding.get("grid_mapping")
+            or da.attrs.get("crs")
+            or da.encoding.get("crs")
+        )
 
-        # Try cf-xarray if available
-        if crs_wkt is None:
+        # Try cf-xarray for robust grid mapping discovery (Aero Protocol: CF-Awareness)
+        if crs_info is None or isinstance(crs_info, str):
             try:
                 # Use cf-xarray to find the grid mapping variable
                 gm_var = da.cf.get_grid_mapping()
                 if gm_var is not None:
-                    crs_wkt = gm_var.attrs.get("crs_wkt")
+                    crs_info = (
+                        gm_var.attrs.get("crs_wkt")
+                        or gm_var.attrs.get("spatial_ref")
+                        or gm_var.attrs.get("grid_mapping_name")
+                    )
             except (AttributeError, KeyError, ImportError):
                 pass
 
-        if crs_wkt and pyproj is not None:
+        if crs_info and pyproj is not None:
             try:
                 # Use pyproj to identify the CRS
-                proj_crs = pyproj.CRS(crs_wkt)
+                proj_crs = pyproj.CRS(crs_info)
 
-                # Try to find a matching Cartopy projection
+                # Map pyproj CRS to Cartopy projections
                 if proj_crs.is_geographic:
                     transform = ccrs.PlateCarree()
                 elif proj_crs.is_projected:
-                    # Attempt UTM detection
+                    # Attempt robust projection detection
+                    # UTM detection
                     if proj_crs.utm_zone:
                         transform = ccrs.UTM(
                             zone=int(proj_crs.utm_zone[:-1]),
                             southern_hemisphere="S" in proj_crs.utm_zone,
                         )
-                    # Generic fallback for other projected CRS if cartopy supports it
-                    # (Simplified for this implementation)
+                    # Mercator
+                    elif "merc" in proj_crs.to_dict().get("proj", ""):
+                        transform = ccrs.Mercator()
+                    # Lambert Conformal
+                    elif "lcc" in proj_crs.to_dict().get("proj", ""):
+                        transform = ccrs.LambertConformal(
+                            central_longitude=proj_crs.to_dict().get("lon_0", 0.0),
+                            central_latitude=proj_crs.to_dict().get("lat_0", 0.0),
+                        )
             except Exception:
                 pass
 
@@ -110,66 +136,136 @@ def plot_static(
     if transform is None:
         transform = ccrs.PlateCarree()
 
-    if "ax" in kwargs:
-        ax = kwargs.pop("ax")
-        # Ensure the existing axes is a GeoAxes if we are using cartopy
-        is_geoaxes = False
-        try:
-            import cartopy.mpl.geoaxes as geoaxes
+    # Handle axes and faceting
+    is_faceted = "col" in kwargs or "row" in kwargs
+    ax = kwargs.pop("ax", None)
 
-            is_geoaxes = isinstance(ax, geoaxes.GeoAxes)
-        except ImportError:
-            is_geoaxes = hasattr(ax, "projection")
-
-        if not is_geoaxes:
-            import warnings
-
+    if ax is not None:
+        if is_faceted:
             warnings.warn(
-                "The provided axes does not appear to be a Cartopy GeoAxes. "
-                "Geospatial plotting may not work as expected. "
-                "Ensure your axes was created with a projection (e.g., plt.axes(projection=...))."
+                "Providing an 'ax' with faceting ('col' or 'row') is not supported by xarray and will be ignored."
             )
-    else:
+            ax = None
+        else:
+            # Ensure the existing axes is a GeoAxes if we are using cartopy
+            is_geoaxes = False
+            try:
+                import cartopy.mpl.geoaxes as geoaxes
+
+                is_geoaxes = isinstance(ax, geoaxes.GeoAxes)
+            except ImportError:
+                is_geoaxes = hasattr(ax, "projection")
+
+            if not is_geoaxes:
+                warnings.warn(
+                    "The provided axes does not appear to be a Cartopy GeoAxes. "
+                    "Geospatial plotting may not work as expected. "
+                    "Ensure your axes was created with a projection (e.g., plt.axes(projection=...))."
+                )
+
+    if ax is None and not is_faceted:
+        # Strictly enforce projection in axes creation (Aero Protocol)
+        if projection is None and ccrs is not None:
+            projection = ccrs.PlateCarree()
         ax = plt.axes(projection=projection)
 
     # Enforce transform for geospatial accuracy (Aero Protocol)
+    if transform is None and ccrs is not None:
+        transform = ccrs.PlateCarree()
+
     if "transform" not in kwargs:
         kwargs["transform"] = transform
 
+    if is_faceted and "subplot_kws" not in kwargs:
+        kwargs["subplot_kws"] = {"projection": projection}
+
     # Aero Protocol: No Ambiguous Plots.
-    # If ndim > 2 and no faceting is requested, select first slice.
-    if da.ndim > 2 and "col" not in kwargs and "row" not in kwargs:
-        import warnings
+    # Identify spatial and faceting dimensions to slice away everything else.
 
-        # Identify spatial dimensions using cf-xarray for robust slicing
-        try:
-            # We look for dimensions associated with latitude and longitude
-            lat_dims = da.cf["latitude"].dims
-            lon_dims = da.cf["longitude"].dims
-            spatial_dims = set(lat_dims) | set(lon_dims)
-        except (KeyError, AttributeError, ImportError):
-            # Fallback to assuming the last two dimensions are spatial
-            spatial_dims = set(da.dims[-2:])
+    # Identify spatial dimensions using cf-xarray for robust slicing
+    try:
+        # We look for dimensions associated with latitude and longitude
+        lat_dims = da.cf["latitude"].dims
+        lon_dims = da.cf["longitude"].dims
+        spatial_dims = set(lat_dims) | set(lon_dims)
+    except (KeyError, AttributeError, ImportError):
+        # Fallback to assuming the last two dimensions are spatial
+        spatial_dims = set(da.dims[-2:])
 
-        non_spatial_dims = [d for d in da.dims if d not in spatial_dims]
+    # Identify dimensions used for faceting
+    facet_dims = {kwargs.get("col"), kwargs.get("row")} - {None}
 
-        if non_spatial_dims:
-            first_slice = {d: 0 for d in non_spatial_dims}
-            warnings.warn(
-                f"DataArray has {da.ndim} dimensions. "
-                f"Automatically selecting the first slice along {list(first_slice.keys())}: {first_slice}. "
-                "To plot other slices, subset your data before calling plot_static or use 'col'/'row' for facets."
-            )
-            da = da.isel(first_slice)
+    # Dimensions that are neither spatial nor used for faceting
+    extra_dims = [d for d in da.dims if d not in spatial_dims and d not in facet_dims]
+
+    if extra_dims:
+        first_slice = {d: 0 for d in extra_dims}
+        warnings.warn(
+            f"DataArray has {da.ndim} dimensions, but only 2 spatial dimensions "
+            f"(plus optional faceting) are supported for static plots. "
+            f"Automatically selecting the first slice along {extra_dims}: {first_slice}. "
+            "To plot other slices, subset your data before calling plot_static."
+        )
+        da = da.isel(first_slice)
 
     im = da.plot(ax=ax, **kwargs)
 
-    if hasattr(ax, "coastlines"):
-        ax.coastlines()
+    if is_faceted:
+        # im is a FacetGrid
+        if hasattr(im, "axes"):
+            for a in im.axes.flat:
+                if hasattr(a, "coastlines"):
+                    a.coastlines()
+        if title:
+            plt.suptitle(title, y=1.02)
+    else:
+        # im is a QuadMesh or similar
+        if hasattr(ax, "coastlines"):
+            ax.coastlines()
 
-    ax.set_title(title)
+        if title is None:
+            title = da.name if da.name else "Static Map"
+        ax.set_title(title)
 
     return im
+
+
+def plot(
+    da: xr.DataArray,
+    mode: str = "static",
+    **kwargs: Any,
+) -> Any:
+    """
+    Unified entry point for xregrid plotting following the Two-Track Rule.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        The DataArray to plot.
+    mode : str, default 'static'
+        The plotting mode: 'static' (Track A: Publication) or
+        'interactive' (Track B: Exploration).
+    **kwargs : Any
+        Additional arguments passed to plot_static or plot_interactive.
+
+    Returns
+    -------
+    Any
+        The plot object (Matplotlib artist or HvPlot object).
+
+    Raises
+    ------
+    ValueError
+        If an unknown plotting mode is provided.
+    """
+    if mode == "static":
+        return plot_static(da, **kwargs)
+    elif mode == "interactive":
+        return plot_interactive(da, **kwargs)
+    else:
+        raise ValueError(
+            f"Unknown plotting mode: '{mode}'. Must be 'static' or 'interactive'."
+        )
 
 
 def plot_interactive(
@@ -194,8 +290,13 @@ def plot_interactive(
 
     Returns
     -------
-    hvplot.Interactive
-        The interactive plot object.
+    Any
+        The interactive plot object (HvPlot/HoloViews).
+
+    Raises
+    ------
+    ImportError
+        If HvPlot is not installed.
     """
     if not hvplot:
         raise ImportError(
@@ -203,3 +304,265 @@ def plot_interactive(
             "Install it with `pip install hvplot`."
         )
     return da.hvplot(rasterize=rasterize, title=title, **kwargs)
+
+
+def plot_diagnostics(
+    regridder: "Regridder",
+    projection: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Track A: Plot spatial diagnostics for a Regridder.
+
+    Parameters
+    ----------
+    regridder : Regridder
+        The Regridder instance to diagnose.
+    projection : Any, optional
+        The projection for the axes. Defaults to ccrs.PlateCarree() if available.
+    **kwargs : Any
+        Additional arguments passed to plot_static.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure object.
+
+    Raises
+    ------
+    ImportError
+        If Matplotlib is not installed.
+    """
+    if plt is None:
+        raise ImportError("Matplotlib is required for plot_diagnostics.")
+
+    ds_diag = regridder.diagnostics()
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(12, 5),
+        subplot_kw={"projection": projection or (ccrs.PlateCarree() if ccrs else None)},
+    )
+
+    plot_static(
+        ds_diag.weight_sum,
+        ax=axes[0],
+        title="Weight Sum",
+        cmap="viridis",
+        **kwargs,
+    )
+
+    plot_static(
+        ds_diag.unmapped_mask,
+        ax=axes[1],
+        title="Unmapped Mask (1=Unmapped)",
+        cmap="Reds",
+        **kwargs,
+    )
+
+    fig.suptitle(f"Regridder Diagnostics ({regridder.method})", fontsize=16)
+    plt.tight_layout()
+
+    return fig
+
+
+def plot_comparison(
+    da_src: xr.DataArray,
+    da_tgt: xr.DataArray,
+    regridder: Optional[Any] = None,
+    projection: Any = None,
+    transform: Any = None,
+    cmap: str = "viridis",
+    diff_cmap: str = "RdBu_r",
+    title: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Track A: Publication-quality comparison plot (Source, Target, Difference).
+
+    Parameters
+    ----------
+    da_src : xr.DataArray
+        The source DataArray.
+    da_tgt : xr.DataArray
+        The target (regridded) DataArray.
+    regridder : Regridder, optional
+        The regridder used to transform da_src to da_tgt.
+        If provided, it will be used to calculate the difference plot correctly.
+    projection : Any, optional
+        The projection for the axes.
+    transform : Any, optional
+        The transform for the plot call.
+    cmap : str, default 'viridis'
+        Colormap for the data plots.
+    diff_cmap : str, default 'RdBu_r'
+        Colormap for the difference plot.
+    title : str, optional
+        Overall figure title.
+    **kwargs : Any
+        Additional arguments passed to plot_static.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure object.
+
+    Raises
+    ------
+    ImportError
+        If Matplotlib is not installed.
+    """
+    if plt is None:
+        raise ImportError("Matplotlib is required for plot_comparison.")
+
+    if projection is None and ccrs is not None:
+        projection = ccrs.PlateCarree()
+
+    # Enforce projection on all subplots for comparison consistency (Aero Protocol)
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(18, 5),
+        subplot_kw={"projection": projection},
+    )
+
+    # 1. Source Plot
+    plot_static(
+        da_src,
+        ax=axes[0],
+        projection=projection,
+        transform=transform,
+        cmap=cmap,
+        title="Source Grid",
+        **kwargs,
+    )
+
+    # 2. Target Plot
+    plot_static(
+        da_tgt,
+        ax=axes[1],
+        projection=projection,
+        transform=transform,
+        cmap=cmap,
+        title="Target Grid",
+        **kwargs,
+    )
+
+    # 3. Difference Plot
+    # Use Regridder if provided for exact difference, otherwise fallback to interp_like
+    try:
+        if regridder is not None:
+            da_src_interp = regridder(da_src)
+        else:
+            da_src_interp = da_src.interp_like(da_tgt, method="linear")
+
+        diff = da_tgt - da_src_interp
+        plot_static(
+            diff,
+            ax=axes[2],
+            projection=projection,
+            transform=transform,
+            cmap=diff_cmap,
+            title="Difference (Tgt - Src_interp)",
+            **kwargs,
+        )
+    except Exception as e:
+        axes[2].text(
+            0.5,
+            0.5,
+            f"Could not compute difference:\n{e}",
+            ha="center",
+            va="center",
+            transform=axes[2].transAxes,
+        )
+        axes[2].set_title("Difference")
+
+    if title:
+        fig.suptitle(title, fontsize=16)
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_comparison_interactive(
+    da_src: xr.DataArray,
+    da_tgt: xr.DataArray,
+    regridder: Optional[Any] = None,
+    rasterize: bool = True,
+    cmap: str = "viridis",
+    diff_cmap: str = "RdBu_r",
+    title: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Track B: Exploratory interactive comparison plot (Source, Target, Difference).
+
+    Uses HvPlot and HoloViews to provide a side-by-side interactive view.
+
+    Parameters
+    ----------
+    da_src : xr.DataArray
+        The source DataArray.
+    da_tgt : xr.DataArray
+        The target (regridded) DataArray.
+    regridder : Regridder, optional
+        The regridder used to transform da_src to da_tgt.
+        If provided, it will be used to calculate the difference plot correctly.
+    rasterize : bool, default True
+        Whether to rasterize the grid for large datasets (Aero Protocol requirement).
+    cmap : str, default 'viridis'
+        Colormap for the data plots.
+    diff_cmap : str, default 'RdBu_r'
+        Colormap for the difference plot.
+    title : str, optional
+        Overall plot title.
+    **kwargs : Any
+        Additional arguments passed to hvplot calls.
+
+    Returns
+    -------
+    Any
+        The composed HoloViews object (Layout).
+
+    Raises
+    ------
+    ImportError
+        If HvPlot or HoloViews is not installed.
+    """
+    if not hvplot or hv is None:
+        raise ImportError(
+            "HvPlot and HoloViews are required for plot_comparison_interactive. "
+            "Install them with `pip install hvplot holoviews`."
+        )
+
+    # 1. Source Plot
+    p_src = da_src.hvplot(rasterize=rasterize, cmap=cmap, title="Source Grid", **kwargs)
+
+    # 2. Target Plot
+    p_tgt = da_tgt.hvplot(rasterize=rasterize, cmap=cmap, title="Target Grid", **kwargs)
+
+    # 3. Difference Plot
+    try:
+        if regridder is not None:
+            da_src_interp = regridder(da_src)
+        else:
+            da_src_interp = da_src.interp_like(da_tgt, method="linear")
+
+        diff = da_tgt - da_src_interp
+        p_diff = diff.hvplot(
+            rasterize=rasterize,
+            cmap=diff_cmap,
+            title="Difference (Tgt - Src_interp)",
+            **kwargs,
+        )
+    except Exception as e:
+        # Fallback to a placeholder if difference computation fails
+        p_diff = hv.Text(0.5, 0.5, f"Could not compute difference:\n{e}")
+
+    layout = (p_src + p_tgt + p_diff).cols(3)
+
+    if title:
+        layout = layout.opts(title=title)
+
+    return layout

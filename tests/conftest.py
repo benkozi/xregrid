@@ -19,6 +19,12 @@ except ImportError:
     mock_esmpy.ExtrapMethod.NEAREST_STOD = 0
     mock_esmpy.ExtrapMethod.NEAREST_IDAVG = 1
     mock_esmpy.ExtrapMethod.CREEP_FILL = 2
+    mock_esmpy.MeshLoc.NODE = 0
+    mock_esmpy.MeshLoc.ELEMENT = 1
+    mock_esmpy.MeshElemType.TRI = 1
+    mock_esmpy.MeshElemType.QUAD = 2
+    mock_esmpy.NormType.FRACAREA = 0
+    mock_esmpy.NormType.DSTAREA = 1
 
     # Mock Manager
     mock_esmpy.Manager.return_value = MagicMock()
@@ -26,8 +32,36 @@ except ImportError:
     mock_esmpy.local_pet.return_value = 0
 
     # Mock Grid
-    mock_grid = MagicMock()
-    mock_esmpy.Grid.return_value = mock_grid
+    class Grid:
+        def __init__(self, *args, **kwargs):
+            self.get_coords = MagicMock()
+            self.get_item = MagicMock()
+            self.add_item = MagicMock()
+            self.staggerloc = [0, 1]
+
+    mock_esmpy.Grid = Grid
+
+    class LocStream:
+        def __init__(self, *args, **kwargs):
+            self.items = {}
+
+        def __setitem__(self, key, value):
+            self.items[key] = value
+
+    mock_esmpy.LocStream = LocStream
+
+    class Mesh:
+        def __init__(self, *args, **kwargs):
+            self.nodes = []
+            self.elements = []
+
+        def add_nodes(self, *args, **kwargs):
+            pass
+
+        def add_elements(self, *args, **kwargs):
+            pass
+
+    mock_esmpy.Mesh = Mesh
 
     # Mock Field
     mock_esmpy.Field.return_value = MagicMock()
