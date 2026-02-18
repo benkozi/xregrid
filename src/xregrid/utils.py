@@ -3,10 +3,14 @@ from __future__ import annotations
 import datetime
 import os
 import socket
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
-import pyproj
+
+try:
+    import pyproj
+except ImportError:
+    pyproj = None
 import xarray as xr
 
 
@@ -14,6 +18,7 @@ def create_global_grid(
     res_lat: float,
     res_lon: float,
     add_bounds: bool = True,
+    chunks: Optional[Union[int, Dict[str, int]]] = None,
 ) -> xr.Dataset:
     """
     Create a global rectilinear grid dataset.
@@ -26,6 +31,9 @@ def create_global_grid(
         Longitude resolution in degrees.
     add_bounds : bool, default True
         Whether to add cell boundary coordinates.
+    chunks : int or dict, optional
+        Chunk sizes for the resulting dask-backed dataset.
+        If None (default), returns an eager NumPy-backed dataset.
 
     Returns
     -------
@@ -51,16 +59,26 @@ def create_global_grid(
     )
 
     if add_bounds:
-        lat_b = np.arange(-90, 90 + res_lat, res_lat)
-        lon_b = np.arange(0, 360 + res_lon, res_lon)
-        ds.coords["lat_b"] = (["lat_b"], lat_b, {"units": "degrees_north"})
-        ds.coords["lon_b"] = (["lon_b"], lon_b, {"units": "degrees_east"})
+        # Use CF-compliant (N, 2) bounds that share dimensions with the grid.
+        # This ensures they are correctly subsetted and sorted by xarray.
+        # (Aero Protocol: Dask Efficiency & Robustness)
+        lat_b_1d = np.arange(-90, 90 + res_lat, res_lat)
+        lon_b_1d = np.arange(0, 360 + res_lon, res_lon)
+
+        lat_b_2d = np.stack([lat_b_1d[:-1], lat_b_1d[1:]], axis=1)
+        lon_b_2d = np.stack([lon_b_1d[:-1], lon_b_1d[1:]], axis=1)
+
+        ds.coords["lat_b"] = (["lat", "nv"], lat_b_2d, {"units": "degrees_north"})
+        ds.coords["lon_b"] = (["lon", "nv"], lon_b_2d, {"units": "degrees_east"})
 
         # Link bounds using cf-xarray convention
         ds["lat"].attrs["bounds"] = "lat_b"
         ds["lon"].attrs["bounds"] = "lon_b"
 
     update_history(ds, f"Created global grid ({res_lat}x{res_lon}) using xregrid.")
+
+    if chunks is not None:
+        ds = ds.chunk(chunks)
 
     return ds
 
@@ -71,6 +89,7 @@ def create_regional_grid(
     res_lat: float,
     res_lon: float,
     add_bounds: bool = True,
+    chunks: Optional[Union[int, Dict[str, int]]] = None,
 ) -> xr.Dataset:
     """
     Create a regional rectilinear grid dataset.
@@ -87,6 +106,9 @@ def create_regional_grid(
         Longitude resolution in degrees.
     add_bounds : bool, default True
         Whether to add cell boundary coordinates.
+    chunks : int or dict, optional
+        Chunk sizes for the resulting dask-backed dataset.
+        If None (default), returns an eager NumPy-backed dataset.
 
     Returns
     -------
@@ -112,15 +134,23 @@ def create_regional_grid(
     )
 
     if add_bounds:
-        lat_b = np.arange(lat_range[0], lat_range[1] + res_lat, res_lat)
-        lon_b = np.arange(lon_range[0], lon_range[1] + res_lon, res_lon)
-        ds.coords["lat_b"] = (["lat_b"], lat_b, {"units": "degrees_north"})
-        ds.coords["lon_b"] = (["lon_b"], lon_b, {"units": "degrees_east"})
+        # Use CF-compliant (N, 2) bounds.
+        lat_b_1d = np.arange(lat_range[0], lat_range[1] + res_lat, res_lat)
+        lon_b_1d = np.arange(lon_range[0], lon_range[1] + res_lon, res_lon)
+
+        lat_b_2d = np.stack([lat_b_1d[:-1], lat_b_1d[1:]], axis=1)
+        lon_b_2d = np.stack([lon_b_1d[:-1], lon_b_1d[1:]], axis=1)
+
+        ds.coords["lat_b"] = (["lat", "nv"], lat_b_2d, {"units": "degrees_north"})
+        ds.coords["lon_b"] = (["lon", "nv"], lon_b_2d, {"units": "degrees_east"})
 
         ds["lat"].attrs["bounds"] = "lat_b"
         ds["lon"].attrs["bounds"] = "lon_b"
 
     update_history(ds, f"Created regional grid ({res_lat}x{res_lon}) using xregrid.")
+
+    if chunks is not None:
+        ds = ds.chunk(chunks)
 
     return ds
 
@@ -185,6 +215,67 @@ def load_esmf_file(filepath: str) -> xr.Dataset:
     return ds
 
 
+def get_crs_info(obj: Union[xr.DataArray, xr.Dataset]) -> Optional[Any]:
+    """
+    Detect CRS information from an xarray object's attributes or encoding.
+
+    Checks for 'grid_mapping', 'crs', and utilizes cf-xarray for robust discovery.
+
+    Parameters
+    ----------
+    obj : xr.DataArray or xr.Dataset
+        The xarray object to inspect.
+
+    Returns
+    -------
+    pyproj.CRS, optional
+        The detected CRS object, or None if no CRS info is found.
+    """
+    if pyproj is None or obj is None:
+        return None
+
+    # Try to detect CRS from attributes and encoding
+    # We prioritize 'grid_mapping' then 'crs'
+    crs_info = (
+        obj.attrs.get("grid_mapping")
+        or obj.encoding.get("grid_mapping")
+        or obj.attrs.get("crs")
+        or obj.encoding.get("crs")
+    )
+
+    # Try cf-xarray for robust grid mapping discovery
+    if crs_info is None or isinstance(crs_info, str):
+        try:
+            # Use cf-xarray to find the grid mapping variable
+            # Some versions use get_grid_mapping(), others use grid_mappings property
+            gm_var = None
+            if hasattr(obj.cf, "get_grid_mapping"):
+                gm_var = obj.cf.get_grid_mapping()
+            elif hasattr(obj.cf, "grid_mappings"):
+                gms = obj.cf.grid_mappings
+                if gms:
+                    # In newer cf-xarray, grid_mappings returns a list/tuple of GridMapping objects
+                    # Each GridMapping object has an 'array' attribute (the DataArray)
+                    gm_var = gms[0].array if hasattr(gms[0], "array") else gms[0]
+
+            if gm_var is not None:
+                crs_info = (
+                    gm_var.attrs.get("crs_wkt")
+                    or gm_var.attrs.get("spatial_ref")
+                    or gm_var.attrs.get("grid_mapping_name")
+                )
+        except (AttributeError, KeyError, ImportError):
+            pass
+
+    if crs_info:
+        try:
+            return pyproj.CRS(crs_info)
+        except Exception:
+            pass
+
+    return None
+
+
 def update_history(
     obj: Union[xr.DataArray, xr.Dataset], message: str
 ) -> Union[xr.DataArray, xr.Dataset]:
@@ -213,10 +304,11 @@ def update_history(
 
 
 def create_grid_from_crs(
-    crs: Union[str, int, pyproj.CRS],
+    crs: Union[str, int, Any],
     extent: Tuple[float, float, float, float],
     res: Union[float, Tuple[float, float]],
     add_bounds: bool = True,
+    chunks: Optional[Union[int, Dict[str, int]]] = None,
 ) -> xr.Dataset:
     """
     Create a structured grid dataset from a CRS and extent.
@@ -232,6 +324,9 @@ def create_grid_from_crs(
         If tuple, (res_x, res_y).
     add_bounds : bool, default True
         Whether to add cell boundary coordinates.
+    chunks : int or dict, optional
+        Chunk sizes for the resulting dask-backed dataset.
+        If None (default), returns an eager NumPy-backed dataset.
 
     Returns
     -------
@@ -250,6 +345,11 @@ def create_grid_from_crs(
     xx, yy = np.meshgrid(x, y)
 
     # Transform to lat/lon
+    if pyproj is None:
+        raise ImportError(
+            "pyproj is required for create_grid_from_crs. "
+            "Install it with `pip install pyproj`."
+        )
     crs_obj = pyproj.CRS(crs)
     transformer = pyproj.Transformer.from_crs(crs_obj, "EPSG:4326", always_xy=True)
     lon, lat = transformer.transform(xx, yy)
@@ -289,20 +389,44 @@ def create_grid_from_crs(
     ds.attrs["crs"] = crs_obj.to_wkt()
 
     if add_bounds:
-        # Derive bounds from center points to ensure alignment
-        x_b = np.concatenate([[x[0] - res_x / 2], x + res_x / 2])
-        y_b = np.concatenate([[y[0] - res_y / 2], y + res_y / 2])
+        # Create CF-compliant curvilinear bounds (Y, X, 4)
+        # This ensures bounds are sliced correctly with centers (Aero Protocol: Scientific Hygiene)
 
-        xx_b, yy_b = np.meshgrid(x_b, y_b)
+        # (4, Y, X)
+        yy_corners, xx_corners = np.meshgrid(y, x, indexing="ij")
+        # We need to broadcast the corners to (4, Y, X)
+        xx_b = np.stack(
+            [
+                np.broadcast_to(x - res_x / 2, (len(y), len(x))),
+                np.broadcast_to(x + res_x / 2, (len(y), len(x))),
+                np.broadcast_to(x + res_x / 2, (len(y), len(x))),
+                np.broadcast_to(x - res_x / 2, (len(y), len(x))),
+            ]
+        )
+        yy_b = np.stack(
+            [
+                np.broadcast_to(y - res_y / 2, (len(x), len(y))).T,
+                np.broadcast_to(y - res_y / 2, (len(x), len(y))).T,
+                np.broadcast_to(y + res_y / 2, (len(x), len(y))).T,
+                np.broadcast_to(y + res_y / 2, (len(x), len(y))).T,
+            ]
+        )
+
         lon_b, lat_b = transformer.transform(xx_b, yy_b)
+        # Reshape to (Y, X, 4)
+        lat_b = np.moveaxis(lat_b, 0, -1)
+        lon_b = np.moveaxis(lon_b, 0, -1)
 
-        ds.coords["lat_b"] = (["y_b", "x_b"], lat_b, {"units": "degrees_north"})
-        ds.coords["lon_b"] = (["y_b", "x_b"], lon_b, {"units": "degrees_east"})
+        ds.coords["lat_b"] = (["y", "x", "nv"], lat_b, {"units": "degrees_north"})
+        ds.coords["lon_b"] = (["y", "x", "nv"], lon_b, {"units": "degrees_east"})
 
         ds["lat"].attrs["bounds"] = "lat_b"
         ds["lon"].attrs["bounds"] = "lon_b"
 
     update_history(ds, f"Created grid from CRS {crs} using xregrid.")
+
+    if chunks is not None:
+        ds = ds.chunk(chunks)
 
     return ds
 
@@ -310,7 +434,8 @@ def create_grid_from_crs(
 def create_mesh_from_coords(
     x: np.ndarray,
     y: np.ndarray,
-    crs: Union[str, int, pyproj.CRS],
+    crs: Union[str, int, Any],
+    chunks: Optional[Union[int, Dict[str, int]]] = None,
 ) -> xr.Dataset:
     """
     Create an unstructured mesh dataset from coordinates and a CRS.
@@ -323,12 +448,20 @@ def create_mesh_from_coords(
         1D array of y coordinates in CRS units.
     crs : str, int, or pyproj.CRS
         The CRS of the coordinates.
+    chunks : int or dict, optional
+        Chunk sizes for the resulting dask-backed dataset.
+        If None (default), returns an eager NumPy-backed dataset.
 
     Returns
     -------
     xr.Dataset
         The mesh dataset containing 'lat', 'lon' as 1D arrays sharing a dimension.
     """
+    if pyproj is None:
+        raise ImportError(
+            "pyproj is required for create_mesh_from_coords. "
+            "Install it with `pip install pyproj`."
+        )
     crs_obj = pyproj.CRS(crs)
     transformer = pyproj.Transformer.from_crs(crs_obj, "EPSG:4326", always_xy=True)
     lon, lat = transformer.transform(x, y)
@@ -351,14 +484,17 @@ def create_mesh_from_coords(
 
     update_history(ds, f"Created mesh from coordinates and CRS {crs} using xregrid.")
 
+    if chunks is not None:
+        ds = ds.chunk(chunks)
+
     return ds
 
 
 def get_rdhpcs_cluster(
     machine: Optional[str] = None,
     account: Optional[str] = None,
-    **kwargs,
-):
+    **kwargs: Any,
+) -> Any:
     """
     Create a dask-jobqueue SLURMCluster for NOAA RDHPCS systems.
 

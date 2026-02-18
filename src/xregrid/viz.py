@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import xarray as xr
 
+from xregrid.utils import get_crs_info
+
 if TYPE_CHECKING:
-    from .xregrid import Regridder
+    from xregrid.regridder import Regridder
 
 try:
     import matplotlib.pyplot as plt
@@ -72,42 +74,54 @@ def plot_static(
             "Install it with `pip install matplotlib`."
         )
 
+    # Handle axes and faceting early to avoid multiple 'ax' arguments (Aero Protocol: Robustness)
+    ax = kwargs.pop("ax", None)
+    is_faceted = "col" in kwargs or "row" in kwargs
+
+    # Aero Protocol: No Ambiguous Plots.
+    # Identify spatial and faceting dimensions to slice away everything else.
+    # We do this early so it applies even if cartopy is missing.
+
+    # Identify spatial dimensions using cf-xarray for robust slicing
+    try:
+        # We look for dimensions associated with latitude and longitude
+        lat_dims = da.cf["latitude"].dims
+        lon_dims = da.cf["longitude"].dims
+        spatial_dims = set(lat_dims) | set(lon_dims)
+    except (KeyError, AttributeError, ImportError):
+        # Fallback to assuming the last two dimensions are spatial
+        spatial_dims = set(da.dims[-2:])
+
+    # Identify dimensions used for faceting
+    facet_dims = {kwargs.get("col"), kwargs.get("row")} - {None}
+
+    # Dimensions that are neither spatial nor used for faceting
+    extra_dims = [d for d in da.dims if d not in spatial_dims and d not in facet_dims]
+
+    if extra_dims:
+        first_slice = {d: 0 for d in extra_dims}
+        warnings.warn(
+            f"DataArray has {da.ndim} dimensions, but only 2 spatial dimensions "
+            f"(plus optional faceting) are supported for static plots. "
+            f"Automatically selecting the first slice along {extra_dims}: {first_slice}. "
+            "To plot other slices, subset your data before calling plot_static."
+        )
+        da = da.isel(first_slice)
+
     if ccrs is None:
         # Fallback to standard matplotlib if cartopy is missing
-        ax = plt.gca()
+        if ax is None:
+            ax = plt.gca()
         im = da.plot(ax=ax, **kwargs)
-        ax.set_title(title)
+        if title:
+            ax.set_title(title)
         return im
 
     if transform is None and ccrs is not None:
-        # Try to detect CRS from attributes and encoding (Aero Protocol: Scientific Hygiene)
-        # We prioritize 'grid_mapping' then 'crs'
-        crs_info = (
-            da.attrs.get("grid_mapping")
-            or da.encoding.get("grid_mapping")
-            or da.attrs.get("crs")
-            or da.encoding.get("crs")
-        )
+        proj_crs = get_crs_info(da)
 
-        # Try cf-xarray for robust grid mapping discovery (Aero Protocol: CF-Awareness)
-        if crs_info is None or isinstance(crs_info, str):
+        if proj_crs:
             try:
-                # Use cf-xarray to find the grid mapping variable
-                gm_var = da.cf.get_grid_mapping()
-                if gm_var is not None:
-                    crs_info = (
-                        gm_var.attrs.get("crs_wkt")
-                        or gm_var.attrs.get("spatial_ref")
-                        or gm_var.attrs.get("grid_mapping_name")
-                    )
-            except (AttributeError, KeyError, ImportError):
-                pass
-
-        if crs_info and pyproj is not None:
-            try:
-                # Use pyproj to identify the CRS
-                proj_crs = pyproj.CRS(crs_info)
-
                 # Map pyproj CRS to Cartopy projections
                 if proj_crs.is_geographic:
                     transform = ccrs.PlateCarree()
@@ -135,10 +149,6 @@ def plot_static(
         projection = ccrs.PlateCarree()
     if transform is None:
         transform = ccrs.PlateCarree()
-
-    # Handle axes and faceting
-    is_faceted = "col" in kwargs or "row" in kwargs
-    ax = kwargs.pop("ax", None)
 
     if ax is not None:
         if is_faceted:
@@ -178,35 +188,6 @@ def plot_static(
 
     if is_faceted and "subplot_kws" not in kwargs:
         kwargs["subplot_kws"] = {"projection": projection}
-
-    # Aero Protocol: No Ambiguous Plots.
-    # Identify spatial and faceting dimensions to slice away everything else.
-
-    # Identify spatial dimensions using cf-xarray for robust slicing
-    try:
-        # We look for dimensions associated with latitude and longitude
-        lat_dims = da.cf["latitude"].dims
-        lon_dims = da.cf["longitude"].dims
-        spatial_dims = set(lat_dims) | set(lon_dims)
-    except (KeyError, AttributeError, ImportError):
-        # Fallback to assuming the last two dimensions are spatial
-        spatial_dims = set(da.dims[-2:])
-
-    # Identify dimensions used for faceting
-    facet_dims = {kwargs.get("col"), kwargs.get("row")} - {None}
-
-    # Dimensions that are neither spatial nor used for faceting
-    extra_dims = [d for d in da.dims if d not in spatial_dims and d not in facet_dims]
-
-    if extra_dims:
-        first_slice = {d: 0 for d in extra_dims}
-        warnings.warn(
-            f"DataArray has {da.ndim} dimensions, but only 2 spatial dimensions "
-            f"(plus optional faceting) are supported for static plots. "
-            f"Automatically selecting the first slice along {extra_dims}: {first_slice}. "
-            "To plot other slices, subset your data before calling plot_static."
-        )
-        da = da.isel(first_slice)
 
     im = da.plot(ax=ax, **kwargs)
 
@@ -336,13 +317,34 @@ def plot_diagnostics(
     if plt is None:
         raise ImportError("Matplotlib is required for plot_diagnostics.")
 
+    # Aero Protocol: Automated projection discovery (No Ambiguous Plots)
+    if projection is None and ccrs is not None:
+        # Attempt to discover projection from target grid
+        target_crs = get_crs_info(regridder.target_grid_ds)
+        if target_crs:
+            if target_crs.is_geographic:
+                projection = ccrs.PlateCarree()
+            elif target_crs.is_projected:
+                # Basic mapping to common projections
+                if target_crs.utm_zone:
+                    projection = ccrs.UTM(
+                        zone=int(target_crs.utm_zone[:-1]),
+                        southern_hemisphere="S" in target_crs.utm_zone,
+                    )
+                elif "merc" in target_crs.to_dict().get("proj", ""):
+                    projection = ccrs.Mercator()
+                else:
+                    projection = ccrs.PlateCarree()
+        else:
+            projection = ccrs.PlateCarree()
+
     ds_diag = regridder.diagnostics()
 
     fig, axes = plt.subplots(
         1,
         2,
         figsize=(12, 5),
-        subplot_kw={"projection": projection or (ccrs.PlateCarree() if ccrs else None)},
+        subplot_kw={"projection": projection},
     )
 
     plot_static(
@@ -365,6 +367,67 @@ def plot_diagnostics(
     plt.tight_layout()
 
     return fig
+
+
+def plot_diagnostics_interactive(
+    regridder: "Regridder",
+    rasterize: bool = True,
+    title: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Track B: Exploratory interactive diagnostic plot.
+
+    Uses HvPlot and HoloViews to provide a side-by-side interactive view
+    of weight_sum and unmapped_mask.
+
+    Parameters
+    ----------
+    regridder : Regridder
+        The Regridder instance to diagnose.
+    rasterize : bool, default True
+        Whether to rasterize the grid for large datasets (Aero Protocol requirement).
+    title : str, optional
+        Overall plot title.
+    **kwargs : Any
+        Additional arguments passed to hvplot calls.
+
+    Returns
+    -------
+    Any
+        The composed HoloViews object (Layout).
+
+    Raises
+    ------
+    ImportError
+        If HvPlot or HoloViews is not installed.
+    """
+    if not hvplot or hv is None:
+        raise ImportError(
+            "HvPlot and HoloViews are required for plot_diagnostics_interactive. "
+            "Install them with `pip install hvplot holoviews`."
+        )
+
+    ds_diag = regridder.diagnostics()
+
+    # 1. Weight Sum Plot
+    p_sum = ds_diag.weight_sum.hvplot(
+        rasterize=rasterize, cmap="viridis", title="Weight Sum", **kwargs
+    )
+
+    # 2. Unmapped Mask Plot
+    p_mask = ds_diag.unmapped_mask.hvplot(
+        rasterize=rasterize, cmap="Reds", title="Unmapped Mask (1=Unmapped)", **kwargs
+    )
+
+    layout = (p_sum + p_mask).cols(2)
+
+    if title is None:
+        title = f"Regridder Diagnostics ({regridder.method})"
+
+    layout = layout.opts(title=title)
+
+    return layout
 
 
 def plot_comparison(
@@ -566,3 +629,48 @@ def plot_comparison_interactive(
         layout = layout.opts(title=title)
 
     return layout
+
+
+def plot_weights(
+    regridder: "Regridder",
+    row_idx: int,
+    **kwargs: Any,
+) -> Any:
+    """
+    Track A: Visualize source points contributing to a specific destination point.
+
+    Parameters
+    ----------
+    regridder : Regridder
+        The Regridder instance.
+    row_idx : int
+        The index of the destination point (0-based).
+    **kwargs : Any
+        Additional arguments passed to plot_static.
+
+    Returns
+    -------
+    Any
+        The plot object.
+    """
+    # Use weights property to ensure they are gathered if remote
+    matrix = regridder.weights
+    row = matrix.getrow(row_idx).toarray().flatten()
+
+    # Reconstruct 2D/1D array on source grid
+    da_weights = xr.DataArray(
+        row.reshape(regridder._shape_source),
+        dims=regridder._dims_source,
+        coords={
+            c: regridder.source_grid_ds.coords[c]
+            for c in regridder.source_grid_ds.coords
+            if set(regridder.source_grid_ds.coords[c].dims).issubset(
+                set(regridder._dims_source)
+            )
+        },
+        name="weights",
+    )
+
+    return plot_static(
+        da_weights, title=f"Weights for Destination Point {row_idx}", **kwargs
+    )
