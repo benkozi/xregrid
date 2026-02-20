@@ -7,6 +7,63 @@ import numpy as np
 import xarray as xr
 
 
+def _get_non_spatial_dims(ds: xr.Dataset) -> set[str]:
+    """
+    Identify dimensions that are likely not spatial (Time, Vertical).
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The dataset to inspect.
+
+    Returns
+    -------
+    set of str
+        Names of non-spatial dimensions.
+    """
+    non_spatial_dims = set()
+
+    # 1. Use cf-xarray axes
+    try:
+        # Time axis
+        if "T" in ds.cf.axes:
+            non_spatial_dims.update(ds.cf.axes["T"])
+        # Vertical axis
+        if "Z" in ds.cf.axes:
+            non_spatial_dims.update(ds.cf.axes["Z"])
+    except (KeyError, AttributeError):
+        pass
+
+    # 2. Heuristics based on dimension names
+    time_names = ["time", "t", "tden", "time_counter", "t_step"]
+    vert_names = [
+        "lev",
+        "level",
+        "depth",
+        "pressure",
+        "sigma",
+        "pres",
+        "height",
+        "altitude",
+        "z",
+    ]
+
+    for dim in ds.dims:
+        dim_lower = str(dim).lower()
+        if dim_lower in time_names or dim_lower in vert_names:
+            non_spatial_dims.add(str(dim))
+
+        # 3. Dtype check for time if it's a coordinate
+        if dim in ds.coords:
+            dtype = ds[dim].dtype
+            if np.issubdtype(dtype, np.datetime64) or np.issubdtype(
+                dtype, np.timedelta64
+            ):
+                non_spatial_dims.add(str(dim))
+
+    return non_spatial_dims
+
+
 def _get_mesh_info(
     ds: xr.Dataset,
 ) -> Tuple[xr.DataArray, xr.DataArray, Tuple[int, ...], Tuple[str, ...], bool]:
@@ -38,6 +95,10 @@ def _get_mesh_info(
     ValueError
         If coordinates have invalid dimensionality.
     """
+    # Identify and filter out non-spatial dimensions (Time, Z)
+    # (Aero Protocol: Scientific Hygiene)
+    non_spatial_dims = _get_non_spatial_dims(ds)
+
     # Handle uxarray objects
     if hasattr(ds, "uxgrid"):
         uxgrid = getattr(ds, "uxgrid")
@@ -63,6 +124,13 @@ def _get_mesh_info(
 
             # If they share same dim, it's unstructured
             if lat.dims == lon.dims:
+                # Apply filtering before returning
+                lat_isel = {d: 0 for d in non_spatial_dims if d in lat.dims}
+                lon_isel = {d: 0 for d in non_spatial_dims if d in lon.dims}
+                if lat_isel:
+                    lat = lat.isel(lat_isel, drop=True)
+                if lon_isel:
+                    lon = lon.isel(lon_isel, drop=True)
                 return lon, lat, lat.shape, lat.dims, True
         except (AttributeError, KeyError):
             pass
@@ -77,6 +145,9 @@ def _get_mesh_info(
         elif "latCell" in ds and "lonCell" in ds:
             lat = ds["latCell"]
             lon = ds["lonCell"]
+        elif "lat_face" in ds and "lon_face" in ds:
+            lat = ds["lat_face"]
+            lon = ds["lon_face"]
         elif "lat_node" in ds and "lon_node" in ds:
             lat = ds["lat_node"]
             lon = ds["lon_node"]
@@ -89,6 +160,14 @@ def _get_mesh_info(
                 "Ensure they are named 'lat'/'lon', 'latCell'/'lonCell', "
                 "'lat_node'/'lon_node', or have CF attributes."
             )
+
+    # Filter out non-spatial dimensions if they are present in lat/lon
+    lat_isel = {d: 0 for d in non_spatial_dims if d in lat.dims}
+    lon_isel = {d: 0 for d in non_spatial_dims if d in lon.dims}
+    if lat_isel:
+        lat = lat.isel(lat_isel, drop=True)
+    if lon_isel:
+        lon = lon.isel(lon_isel, drop=True)
 
     if lat.ndim == 2:
         # Curvilinear
@@ -191,9 +270,20 @@ def _get_grid_bounds(
     lon_b : np.ndarray or None
         Longitude boundary coordinates.
     """
+    non_spatial_dims = _get_non_spatial_dims(ds)
     try:
         lat_b_da = ds.cf.get_bounds("latitude")
         lon_b_da = ds.cf.get_bounds("longitude")
+
+        # Filter out non-spatial dimensions (Aero Protocol: Robustness)
+        for da in [lat_b_da, lon_b_da]:
+            isel_dict = {d: 0 for d in non_spatial_dims if d in da.dims}
+            if isel_dict:
+                if da is lat_b_da:
+                    lat_b_da = lat_b_da.isel(isel_dict, drop=True)
+                elif da is lon_b_da:
+                    lon_b_da = lon_b_da.isel(isel_dict, drop=True)
+
         return _bounds_to_vertices(lat_b_da), _bounds_to_vertices(lon_b_da)
     except (KeyError, AttributeError, ValueError):
         if "lat_b" in ds and "lon_b" in ds:
@@ -301,6 +391,8 @@ def _get_unstructured_mesh_info(
     """
     import esmpy
 
+    non_spatial_dims = _get_non_spatial_dims(ds)
+
     # 0. Detect uxarray
     if hasattr(ds, "uxgrid"):
         uxgrid = getattr(ds, "uxgrid")
@@ -351,9 +443,24 @@ def _get_unstructured_mesh_info(
 
     # 1. Detect MPAS
     if "verticesOnCell" in ds and "latVertex" in ds and "lonVertex" in ds:
-        node_lat = _clip_latitudes(_to_degrees(ds["latVertex"])).values
-        node_lon = _normalize_longitudes(_to_degrees(ds["lonVertex"])).values
-        conn_raw = ds["verticesOnCell"].values
+        v_lat = ds["latVertex"]
+        v_lon = ds["lonVertex"]
+        v_conn = ds["verticesOnCell"]
+
+        # Filter out non-spatial dimensions (Aero Protocol: Robustness)
+        for da in [v_lat, v_lon, v_conn]:
+            isel_dict = {d: 0 for d in non_spatial_dims if d in da.dims}
+            if isel_dict:
+                if da is v_lat:
+                    v_lat = v_lat.isel(isel_dict, drop=True)
+                elif da is v_lon:
+                    v_lon = v_lon.isel(isel_dict, drop=True)
+                elif da is v_conn:
+                    v_conn = v_conn.isel(isel_dict, drop=True)
+
+        node_lat = _clip_latitudes(_to_degrees(v_lat)).values
+        node_lon = _normalize_longitudes(_to_degrees(v_lon)).values
+        conn_raw = v_conn.values
         n_edges = (
             ds["nEdgesOnCell"].values
             if "nEdgesOnCell" in ds
@@ -423,9 +530,24 @@ def _get_unstructured_mesh_info(
             node_lat_var = "node_lat" if "node_lat" in ds else "lat_node"
 
         if node_lon_var in ds and node_lat_var in ds:
-            node_lon = _normalize_longitudes(_to_degrees(ds[node_lon_var])).values
-            node_lat = _clip_latitudes(_to_degrees(ds[node_lat_var])).values
-            conn_raw = ds[conn_var].values
+            v_lon = ds[node_lon_var]
+            v_lat = ds[node_lat_var]
+            v_conn = ds[conn_var]
+
+            # Filter out non-spatial dimensions
+            for da in [v_lon, v_lat, v_conn]:
+                isel_dict = {d: 0 for d in non_spatial_dims if d in da.dims}
+                if isel_dict:
+                    if da is v_lon:
+                        v_lon = v_lon.isel(isel_dict, drop=True)
+                    elif da is v_lat:
+                        v_lat = v_lat.isel(isel_dict, drop=True)
+                    elif da is v_conn:
+                        v_conn = v_conn.isel(isel_dict, drop=True)
+
+            node_lon = _normalize_longitudes(_to_degrees(v_lon)).values
+            node_lat = _clip_latitudes(_to_degrees(v_lat)).values
+            conn_raw = v_conn.values
             start_index = ds[conn_var].attrs.get("start_index", 0)
             fill_value = ds[conn_var].attrs.get("_FillValue", -1)
 
@@ -501,6 +623,7 @@ def _create_esmf_grid(
     """
     import esmpy
 
+    non_spatial_dims = _get_non_spatial_dims(ds)
     lon, lat, shape, dims, is_unstructured = _get_mesh_info(ds)
     provenance = []
     orig_idx = None
@@ -587,7 +710,11 @@ def _create_esmf_grid(
             )
 
         if mask_var and mask_var in ds:
-            locstream["ESMF:Mask"] = ds[mask_var].values.astype(np.int32)
+            v_mask = ds[mask_var]
+            mask_isel = {d: 0 for d in non_spatial_dims if d in v_mask.dims}
+            if mask_isel:
+                v_mask = v_mask.isel(mask_isel, drop=True)
+            locstream["ESMF:Mask"] = v_mask.values.astype(np.int32)
 
         return locstream, provenance, None
     else:
@@ -675,8 +802,13 @@ def _create_esmf_grid(
             )
 
         if mask_var and mask_var in ds:
+            v_mask = ds[mask_var]
+            mask_isel = {d: 0 for d in non_spatial_dims if d in v_mask.dims}
+            if mask_isel:
+                v_mask = v_mask.isel(mask_isel, drop=True)
+
             grid.add_item(esmpy.GridItem.MASK, staggerloc=esmpy.StaggerLoc.CENTER)
             grid.get_item(esmpy.GridItem.MASK, staggerloc=esmpy.StaggerLoc.CENTER)[
                 ...
-            ] = ds[mask_var].values.T.astype(np.int32)
+            ] = v_mask.values.T.astype(np.int32)
         return grid, provenance, None
