@@ -61,7 +61,6 @@ def create_global_grid(
     if add_bounds:
         # Use CF-compliant (N, 2) bounds that share dimensions with the grid.
         # This ensures they are correctly subsetted and sorted by xarray.
-        # (Aero Protocol: Dask Efficiency & Robustness)
         lat_b_1d = np.arange(-90, 90 + res_lat, res_lat)
         lon_b_1d = np.arange(0, 360 + res_lon, res_lon)
 
@@ -386,10 +385,10 @@ def create_grid_from_crs(
             x_da = x_da.chunk({"x": chunks})
             y_da = y_da.chunk({"y": chunks})
 
-    # Use xr.broadcast for lazy 2D arrays (Aero Protocol: Driver Efficiency)
+    # Use xr.broadcast for lazy 2D arrays
     yy_da, xx_da = xr.broadcast(y_da, x_da)
 
-    # Ensure (y, x) order as per Aero Protocol convention
+    # Ensure (y, x) order
     yy_da = yy_da.transpose("y", "x")
     xx_da = xx_da.transpose("y", "x")
 
@@ -401,7 +400,7 @@ def create_grid_from_crs(
         )
     crs_obj = pyproj.CRS(crs)
 
-    # Use apply_ufunc with dask='parallelized' (Aero Protocol: Vectorization)
+    # Use apply_ufunc with dask='parallelized'
     lon, lat = xr.apply_ufunc(
         _transform_coords,
         xx_da,
@@ -449,7 +448,7 @@ def create_grid_from_crs(
 
     if add_bounds:
         # Create CF-compliant curvilinear bounds (Y, X, 4)
-        # This ensures bounds are sliced correctly with centers (Aero Protocol: Scientific Hygiene)
+        # This ensures bounds are sliced correctly with centers
 
         x_b_raw = np.stack([x - res_x / 2, x + res_x / 2, x + res_x / 2, x - res_x / 2])
         y_b_raw = np.stack([y - res_y / 2, y - res_y / 2, y + res_y / 2, y + res_y / 2])
@@ -495,6 +494,88 @@ def create_grid_from_crs(
     return ds
 
 
+def create_grid_from_ioapi(
+    metadata: Dict[str, Any],
+    add_bounds: bool = True,
+    chunks: Optional[Union[int, Dict[str, int]]] = None,
+) -> xr.Dataset:
+    """
+    Create a structured grid dataset from IOAPI-compliant metadata.
+
+    Supports GDTYP:
+    - 1: Lat-Lon
+    - 2: Lambert Conformal
+    - 5: Polar Stereographic
+    - 6: Albers Equal Area
+    - 7: Mercator
+
+    Parameters
+    ----------
+    metadata : dict
+        IOAPI metadata containing GDTYP, P_ALP, P_BET, P_GAM, XCENT, YCENT,
+        XORIG, YORIG, XCELL, YCELL, NCOLS, NROWS.
+    add_bounds : bool, default True
+        Whether to add cell boundary coordinates.
+    chunks : int or dict, optional
+        Chunk sizes for the resulting dask-backed dataset.
+
+    Returns
+    -------
+    xr.Dataset
+        The grid dataset.
+    """
+    gdtyp = metadata["GDTYP"]
+    p_alp = metadata["P_ALP"]
+    p_bet = metadata["P_BET"]
+    xcent = metadata["XCENT"]
+    ycent = metadata["YCENT"]
+    xorig = metadata["XORIG"]
+    yorig = metadata["YORIG"]
+    xcell = metadata["XCELL"]
+    ycell = metadata["YCELL"]
+    ncols = metadata["NCOLS"]
+    nrows = metadata["NROWS"]
+
+    if gdtyp == 1:  # Lat-Lon
+        crs = "EPSG:4326"
+        # In IOAPI Lat-Lon, XORIG/YORIG are degrees, XCELL/YCELL are degrees
+    elif gdtyp == 2:  # Lambert Conformal
+        crs = (
+            f"+proj=lcc +lat_1={p_alp} +lat_2={p_bet} +lat_0={ycent} "
+            f"+lon_0={xcent} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 5:  # Polar Stereographic
+        crs = (
+            f"+proj=stere +lat_0={ycent} +lat_ts={p_alp} +lon_0={xcent} "
+            f"+k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 6:  # Albers Equal Area
+        crs = (
+            f"+proj=aea +lat_1={p_alp} +lat_2={p_bet} +lat_0={ycent} "
+            f"+lon_0={xcent} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 7:  # Mercator
+        crs = (
+            f"+proj=merc +lat_ts={p_alp} +lon_0={xcent} "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    else:
+        raise ValueError(f"Unsupported IOAPI GDTYP: {gdtyp}")
+
+    extent = (xorig, xorig + ncols * xcell, yorig, yorig + nrows * ycell)
+    res = (xcell, ycell)
+
+    ds = create_grid_from_crs(crs, extent, res, add_bounds=add_bounds, chunks=chunks)
+
+    # Attach IOAPI metadata for provenance
+    for k, v in metadata.items():
+        ds.attrs[f"ioapi_{k}"] = v
+
+    update_history(ds, f"Created grid from IOAPI metadata (GDTYP={gdtyp})")
+
+    return ds
+
+
 def create_mesh_from_coords(
     x: np.ndarray,
     y: np.ndarray,
@@ -535,7 +616,7 @@ def create_mesh_from_coords(
         x_da = x_da.chunk(chunks)
         y_da = y_da.chunk(chunks)
 
-    # Use apply_ufunc with dask='parallelized' (Aero Protocol: Vectorization)
+    # Use apply_ufunc with dask='parallelized'
     lon, lat = xr.apply_ufunc(
         _transform_coords,
         x_da,
