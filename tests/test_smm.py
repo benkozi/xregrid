@@ -43,9 +43,9 @@ def test_smm_eager_lazy_comparison(tmp_path):
     xr.testing.assert_allclose(res_eager, res_lazy.compute())
     
     # 7. Verify shape
-    # Target grid 20x20 global: lat=9, lon=18 -> 162
-    assert res_eager.shape == (162,)
-    assert "target_spatial" in res_eager.dims
+    # Target grid 20x20 global: lat=9, lon=18
+    assert res_eager.shape == (9, 18)
+    assert res_eager.dims == ("lat", "lon")
 
 def test_smm_history_update(tmp_path):
     """Verify that SMM updates the history attribute."""
@@ -105,9 +105,11 @@ def test_smm_time_level_varying(tmp_path):
     
     # 1. Test with both time and level specified
     res = smm(da, time_dim="time", level_dim="level")
-    # Target grid 20x20: lat=9, lon=18 -> 162 spatial points
-    assert res.shape == (nt, nl, 162)
+    # Target grid 20x20: lat=9, lon=18
+    assert res.shape == (nt, nl, 9, 18)
     assert res.dims == ("time", "level", "lat", "lon")
+    assert "time" in res.coords
+    assert "level" in res.coords
     
     # 2. Test with only time specified (level becomes spatial) -> This should fail because spatial size won't match
     # spatial size = nl * nlat * nlon = 3 * 18 * 36 = 1944 != 648

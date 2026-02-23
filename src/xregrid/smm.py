@@ -56,6 +56,20 @@ class SMM:
         # Store attributes for provenance and reconstruction
         self.attrs = ds_weights.attrs
 
+        # Store target shape and dimensions if available for reshaping
+        self.shape_dst = None
+        self.dims_dst = None
+        if "shape_dst" in ds_weights.attrs:
+            import ast
+
+            try:
+                self.shape_dst = tuple(ast.literal_eval(ds_weights.attrs["shape_dst"]))
+                self.dims_dst = tuple(ast.literal_eval(ds_weights.attrs["dims_target"]))
+            except (ValueError, SyntaxError):
+                # Fallback if it's already a list/tuple or other format
+                self.shape_dst = tuple(ds_weights.attrs["shape_dst"])
+                self.dims_dst = tuple(ds_weights.attrs["dims_target"])
+
     def __call__(
         self,
         src: xr.DataArray,
@@ -130,6 +144,50 @@ class SMM:
                 "output_sizes": {"target_spatial": self.n_b},
             },
         )
+
+        # Reshape and rename back to target spatial dimensions if metadata is available
+        if self.dims_dst and self.shape_dst:
+            # Current dims: (..., "target_spatial")
+            # We want to replace "target_spatial" with self.dims_dst
+            # And reshape the data accordingly
+            non_spatial_dims = [d for d in dst.dims if d != "target_spatial"]
+            new_dims = tuple(non_spatial_dims) + self.dims_dst
+
+            def _reshape_output(data, target_shape):
+                # data has shape (..., n_b)
+                # target_shape is e.g. (9, 18)
+                other_shape = data.shape[:-1]
+                return data.reshape(other_shape + target_shape)
+
+            # Re-apply apply_ufunc or just use xarray operations?
+            # xarray.DataArray.stack/unstack/reshape is tricky with dask and core dims.
+            # A simpler way is to use dst.stack(target_spatial=self.dims_dst) but in reverse.
+            # Actually, we can just use .assign_coords and .reshape if it's eager,
+            # but for lazy we should be careful.
+
+            # Easiest way to restore dimensions in xarray:
+            dst = dst.assign_coords(target_spatial=np.arange(self.n_b))
+            
+            # If we want to be truly Aero-compliant and lazy-friendly:
+            # we can use another apply_ufunc to reshape or just use xr.DataArray methods.
+            # Since n_b is flat, we can unstack it if we had coordinates.
+            # But we don't have the multi-index.
+            
+            # Let's use a simple reshape and rename
+            dst_data = dst.data.reshape(dst.shape[:-1] + self.shape_dst)
+            dst = xr.DataArray(
+                dst_data,
+                dims=new_dims,
+                coords={d: src.coords[d] for d in non_spatial_dims if d in src.coords},
+                attrs=dst.attrs,
+                name=dst.name,
+            )
+
+            # Re-attach target spatial coordinates if they were not in src
+            # (which is typical for regridding)
+            # We can't easily get them from ESMF weights file unless they were stored as variables.
+            # Standard ESMF weights don't store them. 
+            # Our Regridder could store them, but currently it only stores shapes/dims.
 
         # Update provenance
         if "history" in dst.attrs:
