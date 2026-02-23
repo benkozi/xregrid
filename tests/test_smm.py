@@ -30,10 +30,10 @@ def test_smm_eager_lazy_comparison(tmp_path):
         data_np,
         dims=("lat", "lon"),
         name="test_data"
-    ).stack(spatial=("lat", "lon"))
+    )
     
     # 4. Create Lazy (Dask) source data
-    da_lazy = da_eager.chunk({"spatial": 100})
+    da_lazy = da_eager.chunk({"lat": 9, "lon": 36})
     
     # 5. Apply SMM
     res_eager = smm(da_eager)
@@ -56,8 +56,8 @@ def test_smm_history_update(tmp_path):
     
     smm = SMM(weights_file)
     da = xr.DataArray(
-        np.random.rand(18*36),
-        dims=("spatial",),
+        np.random.rand(18, 36),
+        dims=("lat", "lon"),
         attrs={"history": "original history"}
     )
     
@@ -74,7 +74,48 @@ def test_smm_mismatched_shape(tmp_path):
     
     smm = SMM(weights_file)
     # n_a should be 18*36 = 648. Provide wrong size.
-    da = xr.DataArray(np.random.rand(100), dims=("spatial",))
+    da = xr.DataArray(np.random.rand(10, 10), dims=("lat", "lon"))
     
     with pytest.raises(ValueError, match="Source spatial size"):
         smm(da)
+
+def test_smm_time_level_varying(tmp_path):
+    """Verify SMM with time and level varying data."""
+    weights_file = str(tmp_path / "test_weights.nc")
+    ds_src = create_global_grid(10.0, 10.0)
+    ds_tgt = create_global_grid(20.0, 20.0)
+    Regridder(ds_src, ds_tgt, filename=weights_file, reuse_weights=True)
+    
+    smm = SMM(weights_file)
+    
+    # Create data with (time, level, lat, lon)
+    nt, nl, nlat, nlon = 2, 3, 18, 36
+    data = np.random.rand(nt, nl, nlat, nlon).astype(np.float32)
+    da = xr.DataArray(
+        data,
+        dims=("time", "level", "lat", "lon"),
+        coords={
+            "time": np.arange(nt),
+            "level": np.arange(nl),
+            "lat": ds_src.lat,
+            "lon": ds_src.lon
+        },
+        name="test_varying"
+    )
+    
+    # 1. Test with both time and level specified
+    res = smm(da, time_dim="time", level_dim="level")
+    # Target grid 20x20: lat=9, lon=18 -> 162 spatial points
+    assert res.shape == (nt, nl, 162)
+    assert res.dims == ("time", "level", "target_spatial")
+    
+    # 2. Test with only time specified (level becomes spatial) -> This should fail because spatial size won't match
+    # spatial size = nl * nlat * nlon = 3 * 18 * 36 = 1944 != 648
+    with pytest.raises(ValueError, match="Source spatial size"):
+        smm(da, time_dim="time")
+
+    # 3. Test with Dask
+    da_lazy = da.chunk({"time": 1, "level": 1})
+    res_lazy = smm(da_lazy, time_dim="time", level_dim="level")
+    assert res_lazy.chunks is not None
+    xr.testing.assert_allclose(res, res_lazy.compute())

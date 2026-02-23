@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 import numpy as np
 import xarray as xr
@@ -56,7 +56,12 @@ class SMM:
         # Store attributes for provenance and reconstruction
         self.attrs = ds_weights.attrs
 
-    def __call__(self, src: xr.DataArray) -> xr.DataArray:
+    def __call__(
+        self,
+        src: xr.DataArray,
+        time_dim: Optional[str] = None,
+        level_dim: Optional[str] = None,
+    ) -> xr.DataArray:
         """
         Apply the SMM to the source data array creating a regridding destination array.
 
@@ -64,34 +69,51 @@ class SMM:
         ----------
         src : xr.DataArray
             The source data array to be regridded.
+        time_dim : str, optional
+            The name of the time dimension, if present.
+        level_dim : str, optional
+            The name of the level dimension, if present.
 
         Returns
         -------
         xr.DataArray
             The regridded destination data array.
         """
-        # Ensure we are applying to the flat spatial dimension
-        # In a real scenario, we might need to know which dimensions are spatial.
-        # For SMM, we assume the last dimension(s) match n_a when flattened.
+        # Identify spatial dimensions (those that are not time or level)
+        spatial_dims = [d for d in src.dims if d not in (time_dim, level_dim)]
 
         def _apply_smm(data, matrix):
             # data is (..., spatial)
             original_shape = data.shape
-            spatial_size = original_shape[-1]
+            # The spatial size is the product of all remaining dimensions
+            # apply_ufunc will have moved core dims to the end.
+            # If multiple core dims are provided, they are flattened in the UFUNC input.
+            # Actually, if we provide multiple input_core_dims, the ufunc receives them as-is.
+            # However, ESMF weights are for a flattened spatial dimension.
+
+            # Since we use input_core_dims=spatial_dims, data will have shape (..., *spatial_dims_shape)
+            # We need to flatten the spatial dimensions to match the matrix.
+            n_spatial_dims = len(spatial_dims)
+            spatial_shape = original_shape[len(original_shape) - n_spatial_dims :]
+            other_shape = original_shape[: len(original_shape) - n_spatial_dims]
+
+            spatial_size = int(np.prod(spatial_shape))
             if spatial_size != matrix.shape[1]:
                 raise ValueError(
                     f"Source spatial size {spatial_size} does not match "
                     f"weights source size {matrix.shape[1]}"
                 )
 
-            # Flatten leading dimensions
-            flat_data = data.reshape(-1, spatial_size)
+            # Flatten leading dimensions and spatial dimensions
+            n_other = int(np.prod(other_shape))
+            flat_data = data.reshape(n_other, spatial_size)
+
             # Apply weights: (n_b, n_a) @ (n_a, n_other) -> (n_b, n_other)
             # But matrix @ flat_data.T is (n_b, n_other)
             res = (matrix @ flat_data.T).T
 
             # Reshape back: (..., n_b)
-            new_shape = original_shape[:-1] + (matrix.shape[0],)
+            new_shape = other_shape + (matrix.shape[0],)
             return res.reshape(new_shape)
 
         # Use apply_ufunc for backend-agnostic behavior
@@ -99,7 +121,7 @@ class SMM:
             _apply_smm,
             src,
             kwargs={"matrix": self._matrix},
-            input_core_dims=[["spatial"]],
+            input_core_dims=[spatial_dims],
             output_core_dims=[["target_spatial"]],
             dask="parallelized",
             output_dtypes=[src.dtype],
