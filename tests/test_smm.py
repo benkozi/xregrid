@@ -107,7 +107,7 @@ def test_smm_time_level_varying(tmp_path):
     res = smm(da, time_dim="time", level_dim="level")
     # Target grid 20x20: lat=9, lon=18 -> 162 spatial points
     assert res.shape == (nt, nl, 162)
-    assert res.dims == ("time", "level", "target_spatial")
+    assert res.dims == ("time", "level", "lat", "lon")
     
     # 2. Test with only time specified (level becomes spatial) -> This should fail because spatial size won't match
     # spatial size = nl * nlat * nlon = 3 * 18 * 36 = 1944 != 648
