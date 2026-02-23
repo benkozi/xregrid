@@ -8,9 +8,11 @@ from xregrid.utils import (
 )
 from .viz import plot, plot_comparison, plot_interactive, plot_static
 from .xregrid import Regridder
+from .smm import SMM
 
 __all__ = [
     "Regridder",
+    "SMM",
     "plot",
     "plot_static",
     "plot_interactive",
