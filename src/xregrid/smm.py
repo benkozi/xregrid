@@ -7,7 +7,7 @@ class SMM:
 
     def __init__(self, weights: Path) -> None:
         """
-        Initialize the SMM object with source data and weights.
+        Initialize the SMM object with a weights file and store the derived COO matrix.
 
         Parameters:
         -----------
