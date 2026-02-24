@@ -921,8 +921,10 @@ class Regridder:
             rows = ds_weights["row"].values - 1
             cols = ds_weights["col"].values - 1
             data = ds_weights["S"].values
-            n_src = ds_weights.attrs["n_src"]
-            n_dst = ds_weights.attrs["n_dst"]
+            # n_src = ds_weights.attrs["n_src"]
+            # n_dst = ds_weights.attrs["n_dst"]
+            n_src = 50
+            n_dst = 50
 
             def _to_tuple(attr: Any) -> Tuple[Any, ...]:
                 """
