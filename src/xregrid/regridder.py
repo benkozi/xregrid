@@ -94,7 +94,7 @@ class Regridder:
         filename: str = "weights.nc",
         skipna: bool = False,
         na_thres: float = 1.0,
-        periodic: bool = False,
+        periodic: Optional[bool] = None,
         mpi: bool = False,
         parallel: bool = False,
         compute: bool = True,
@@ -179,8 +179,14 @@ class Regridder:
         self.filename = filename
         self.skipna = skipna
         self.na_thres = na_thres
-        self.periodic = periodic
         self.parallel = parallel
+
+        # Auto-detect periodicity if not specified
+        if periodic is None:
+            self.periodic = self._detect_periodicity(source_grid_ds)
+        else:
+            self.periodic = periodic
+
         self.compute_on_init = compute
         self.extrap_method = extrap_method
         self.extrap_dist_exponent = extrap_dist_exponent
@@ -1289,6 +1295,51 @@ class Regridder:
 
         return _plot_weights(self, row_idx, **kwargs)
 
+    def plot_comparison(
+        self,
+        da_src: xr.DataArray,
+        da_tgt: xr.DataArray,
+        mode: str = "static",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Unified comparison plot (Source, Target, Difference).
+
+        Two-Track Rule:
+        - mode='static' (Track A): Publication-quality plot using Matplotlib/Cartopy.
+        - mode='interactive' (Track B): Exploratory plot using HvPlot/HoloViews.
+
+        Parameters
+        ----------
+        da_src : xr.DataArray
+            The source DataArray.
+        da_tgt : xr.DataArray
+            The target (regridded) DataArray.
+        mode : str, default 'static'
+            The plotting mode: 'static' or 'interactive'.
+        **kwargs : Any
+            Additional arguments passed to the plotting functions.
+
+        Returns
+        -------
+        Any
+            The plot object.
+        """
+        from .viz import plot_comparison as _plot_static
+        from .viz import plot_comparison_interactive as _plot_interactive
+
+        if mode == "static":
+            return _plot_static(da_src, da_tgt, regridder=self, **kwargs)
+        elif mode == "interactive":
+            rasterize = kwargs.pop("rasterize", True)
+            return _plot_interactive(
+                da_src, da_tgt, regridder=self, rasterize=rasterize, **kwargs
+            )
+        else:
+            raise ValueError(
+                f"Unknown plotting mode: '{mode}'. Must be 'static' or 'interactive'."
+            )
+
     def plot_diagnostics(self, mode: str = "static", **kwargs: Any) -> Any:
         """
         Visualize spatial diagnostics of the regridding weights.
@@ -1662,15 +1713,21 @@ class Regridder:
         # 2. Second Pass: Assign relevant coordinates to output
         for c in self.target_grid_ds.coords:
             # Include coordinates that match target dimensions OR are scalar/mapping
-            if set(self.target_grid_ds.coords[c].dims).issubset(
-                set(self._dims_target)
-            ) or c in [target_gm_name, target_mesh_name]:
+            # Aero Protocol: Ensure assigned coordinates are dimensionally compatible with the output
+            c_dims = set(self.target_grid_ds.coords[c].dims)
+            out_dims = set(out.dims)
+            if (
+                c_dims.issubset(set(self._dims_target))
+                or c in [target_gm_name, target_mesh_name]
+            ) and c_dims.issubset(out_dims):
                 target_coords_to_assign[c] = self.target_grid_ds.coords[c]
 
         # Also check data_vars for topology/mapping that might be needed as coords
         for v in [target_gm_name, target_mesh_name]:
             if v and v in self.target_grid_ds.data_vars:
-                target_coords_to_assign[v] = self.target_grid_ds[v]
+                v_dims = set(self.target_grid_ds[v].dims)
+                if v_dims.issubset(set(out.dims)):
+                    target_coords_to_assign[v] = self.target_grid_ds[v]
 
         # Ensure all variables referenced by the mesh topology are also included
         if target_mesh_name:
@@ -1692,7 +1749,9 @@ class Regridder:
                             rv in self.target_grid_ds
                             and rv not in target_coords_to_assign
                         ):
-                            target_coords_to_assign[rv] = self.target_grid_ds[rv]
+                            rv_dims = set(self.target_grid_ds[rv].dims)
+                            if rv_dims.issubset(set(out.dims)):
+                                target_coords_to_assign[rv] = self.target_grid_ds[rv]
 
         out = out.assign_coords(target_coords_to_assign)
 
@@ -1756,6 +1815,55 @@ class Regridder:
             update_history(out, history_msg)
 
         return out
+
+    def _detect_periodicity(self, ds: xr.Dataset) -> bool:
+        """
+        Heuristically detect if a grid is periodic in longitude.
+
+        Checks if the longitude range is approximately 360 degrees.
+        Prioritizes metadata and eager values to avoid hidden Dask computes.
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            The grid dataset to check.
+
+        Returns
+        -------
+        bool
+            True if the grid is detected as periodic.
+        """
+        try:
+            from xregrid.utils import _find_coord
+
+            lon = _find_coord(ds, "lon")
+            if lon is not None:
+                # 1. Check metadata
+                if lon.attrs.get("boundary") == "periodic":
+                    return True
+
+                # 2. Check eager values (dimension coordinates are eager in xarray)
+                if not hasattr(lon.data, "dask"):
+                    lon_min = float(lon.min())
+                    lon_max = float(lon.max())
+                    extent = lon_max - lon_min
+                    # ESMF periodic grids must have extent strictly less than 360
+                    # because the periodicity is handled by connecting the last point to the first.
+                    # If extent is 360, the last point is a duplicate of the first and ESMF will fail.
+                    if 340.0 <= extent < 360.0:
+                        return True
+
+                # 3. Last fallback: Check dimension name
+                if "lon" in lon.dims or "longitude" in lon.dims:
+                    # If it's a global grid from a known generator, it might have attributes
+                    if (
+                        ds.attrs.get("history")
+                        and "global grid" in ds.attrs.get("history", "").lower()
+                    ):
+                        return True
+        except Exception:
+            pass
+        return False
 
     def _regrid_dataset(
         self,
