@@ -19,5 +19,7 @@ dependencies:
   - pooch
   - pytest
   - pip
+  - uxarray
+  - pydantic-settings
   - pip:
     - -e .
