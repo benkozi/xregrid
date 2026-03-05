@@ -201,9 +201,33 @@ class Regridder:
 
         # Determine coordinate system for consistency
         if esmpy is not None:
-            self._coord_sys = (
-                esmpy.CoordSys.SPH_DEG if periodic else esmpy.CoordSys.CART
-            )
+            # Detect if the grids are geographic (lat-lon in degrees)
+            src_crs = get_crs_info(source_grid_ds)
+            tgt_crs = get_crs_info(target_grid_ds)
+
+            # Default to geographic if no CRS found (common for simple lat-lon)
+            is_geographic = True
+            if (src_crs and not src_crs.is_geographic) or (
+                tgt_crs and not tgt_crs.is_geographic
+            ):
+                is_geographic = False
+
+            # Determine if we have unstructured grids
+            _, _, _, _, is_unstructured_src = _get_mesh_info(source_grid_ds)
+            _, _, _, _, is_unstructured_tgt = _get_mesh_info(target_grid_ds)
+
+            # Use SPH_DEG if:
+            # 1. periodic=True
+            # 2. OR it's geographic AND either grid is unstructured (to handle dateline crossing swaths)
+            # Structured non-periodic grids continue using CART by default to maintain
+            # backward compatibility and avoid unwanted wrap-around in regional cases.
+            if periodic or (
+                is_geographic and (is_unstructured_src or is_unstructured_tgt)
+            ):
+                self._coord_sys = esmpy.CoordSys.SPH_DEG
+            else:
+                self._coord_sys = esmpy.CoordSys.CART
+
             self.method_map = {
                 "bilinear": esmpy.RegridMethod.BILINEAR,
                 "conservative": esmpy.RegridMethod.CONSERVE,
@@ -224,6 +248,9 @@ class Regridder:
 
         # Robust coordinate handling: internally sort coordinates to be ascending
         # to ensure ESMF weight generation is stable and avoid boundary issues.
+        # We keep a reference to the original grids for restoration.
+        self._orig_source_grid = source_grid_ds
+        self._orig_target_grid = target_grid_ds
         self.source_grid_ds, self._src_was_sorted = self._normalize_grid(source_grid_ds)
         self.target_grid_ds, self._tgt_was_sorted = self._normalize_grid(target_grid_ds)
 
@@ -308,10 +335,11 @@ class Regridder:
         """
         was_sorted = False
         try:
-            # Only for rectilinear 1D coordinates
+            # Detect spatial coordinates via cf-xarray
             lat_da = ds.cf["latitude"]
             lon_da = ds.cf["longitude"]
 
+            # Only for rectilinear 1D coordinates
             # Must be 1D and not shared (unstructured grids share dimensions)
             if (
                 lat_da.ndim == 1
@@ -332,10 +360,25 @@ class Regridder:
                     is_lon_asc = ds.indexes[lon_dim].is_monotonic_increasing
 
                     if not (is_lat_asc and is_lon_asc):
+                        # Sort to ascending order for ESMF stability
                         ds = ds.sortby([lat_dim, lon_dim])
                         was_sorted = True
         except (KeyError, AttributeError, ValueError):
-            pass
+            # Fallback to projected coordinates if geographic not found
+            try:
+                x_da = ds.cf["projection_x_coordinate"]
+                y_da = ds.cf["projection_y_coordinate"]
+
+                if x_da.ndim == 1 and y_da.ndim == 1 and x_da.dims[0] != y_da.dims[0]:
+                    x_dim, y_dim = x_da.dims[0], y_da.dims[0]
+                    if not (
+                        ds.indexes[x_dim].is_monotonic_increasing
+                        and ds.indexes[y_dim].is_monotonic_increasing
+                    ):
+                        ds = ds.sortby([y_dim, x_dim])
+                        was_sorted = True
+            except (KeyError, AttributeError, ValueError):
+                pass
         return ds, was_sorted
 
     def _validate_weights(self) -> None:
@@ -1423,8 +1466,8 @@ class Regridder:
             res = self._regrid_dataset(obj, skipna=skipna, na_thres=na_thres)
             # Restore original target coordinate order if it was sorted
             if self._tgt_was_sorted:
-                # Use sel to restore order without full reindexing if possible
-                res = res.sel({d: self.target_grid_ds[d] for d in self._dims_target})
+                # Use sel to restore order from the original target grid
+                res = res.sel({d: self._orig_target_grid[d] for d in self._dims_target})
             return res
         elif isinstance(obj, xr.DataArray):
             # Check if DataArray is regriddable
@@ -1448,7 +1491,8 @@ class Regridder:
                 obj = obj.sortby([self._dims_source[0], self._dims_source[1]])
             res = self._regrid_dataarray(obj, skipna=skipna, na_thres=na_thres)
             if self._tgt_was_sorted:
-                res = res.sel({d: self.target_grid_ds[d] for d in self._dims_target})
+                # Use sel to restore order from the original target grid
+                res = res.sel({d: self._orig_target_grid[d] for d in self._dims_target})
             return res
         # Handle uxarray objects if they don't pass isinstance(xr.Dataset)
         elif hasattr(obj, "uxgrid"):
@@ -1848,7 +1892,7 @@ class Regridder:
         try:
             from xregrid.utils import _find_coord
 
-            lon = _find_coord(ds, "lon")
+            lon = _find_coord(ds, "longitude")
             if lon is not None:
                 # 1. Check metadata
                 if lon.attrs.get("boundary") == "periodic":
@@ -1862,7 +1906,8 @@ class Regridder:
                     # ESMF periodic grids must have extent strictly less than 360
                     # because the periodicity is handled by connecting the last point to the first.
                     # If extent is 360, the last point is a duplicate of the first and ESMF will fail.
-                    if 340.0 <= extent < 360.0:
+                    # Use a tighter bound (354 degrees) to avoid false positives for regional swaths.
+                    if 354.0 <= extent < 360.0:
                         return True
 
                 # 3. Last fallback: Check dimension name
