@@ -4,6 +4,7 @@ import xarray as xr
 import dask.array as da
 from xregrid import Regridder, create_global_grid
 from xregrid.utils import _find_coord
+from unittest.mock import patch
 
 
 def test_enhanced_coord_discovery():
@@ -80,29 +81,30 @@ def test_auto_periodicity_lazy():
     assert regridder_meta.periodic is True
 
 
-def test_plot_comparison_dispatch(mocker):
+def test_plot_comparison_dispatch():
     """Verify plot_comparison method correctly dispatches to viz."""
     # Mock viz functions
-    mock_static = mocker.patch("xregrid.viz.plot_comparison")
-    mock_interactive = mocker.patch("xregrid.viz.plot_comparison_interactive")
+    with patch("xregrid.viz.plot_comparison") as mock_static:
+        with patch("xregrid.viz.plot_comparison_interactive") as mock_interactive:
+            src = create_global_grid(30, 30)
+            regridder = Regridder(src, src, periodic=False)
 
-    src = create_global_grid(30, 30)
-    regridder = Regridder(src, src, periodic=False)
+            da_src = xr.DataArray(np.random.rand(6, 12), dims=("lat", "lon"))
+            da_tgt = xr.DataArray(np.random.rand(6, 12), dims=("lat", "lon"))
 
-    da_src = xr.DataArray(np.random.rand(6, 12), dims=("lat", "lon"))
-    da_tgt = xr.DataArray(np.random.rand(6, 12), dims=("lat", "lon"))
+            # Track A (Static)
+            regridder.plot_comparison(da_src, da_tgt, mode="static", custom_kw="test")
+            mock_static.assert_called_once_with(
+                da_src, da_tgt, regridder=regridder, custom_kw="test"
+            )
 
-    # Track A (Static)
-    regridder.plot_comparison(da_src, da_tgt, mode="static", custom_kw="test")
-    mock_static.assert_called_once_with(
-        da_src, da_tgt, regridder=regridder, custom_kw="test"
-    )
-
-    # Track B (Interactive)
-    regridder.plot_comparison(da_src, da_tgt, mode="interactive", rasterize=False)
-    mock_interactive.assert_called_once_with(
-        da_src, da_tgt, regridder=regridder, rasterize=False
-    )
+            # Track B (Interactive)
+            regridder.plot_comparison(
+                da_src, da_tgt, mode="interactive", rasterize=False
+            )
+            mock_interactive.assert_called_once_with(
+                da_src, da_tgt, regridder=regridder, rasterize=False
+            )
 
 
 if __name__ == "__main__":

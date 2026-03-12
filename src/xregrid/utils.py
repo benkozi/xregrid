@@ -17,6 +17,11 @@ try:
 except ImportError:
     da = None
 
+try:
+    import dask
+except ImportError:
+    dask = None
+
 import xarray as xr
 
 
@@ -625,6 +630,19 @@ def create_grid_from_crs(
         lat_b = lat_b.transpose("y", "x", "nv")
         lon_b = lon_b.transpose("y", "x", "nv")
 
+        # Add 1D projected bounds using backend-agnostic xarray operations
+        x_b_da_1d = xr.concat(
+            [x_da - res_x / 2, x_da + res_x / 2], dim="nbounds"
+        ).transpose("x", "nbounds")
+        y_b_da_1d = xr.concat(
+            [y_da - res_y / 2, y_da + res_y / 2], dim="nbounds"
+        ).transpose("y", "nbounds")
+
+        ds.coords["x_b"] = (["x", "nbounds"], x_b_da_1d.data, {"units": units})
+        ds.coords["y_b"] = (["y", "nbounds"], y_b_da_1d.data, {"units": units})
+        ds["x"].attrs["bounds"] = "x_b"
+        ds["y"].attrs["bounds"] = "y_b"
+
         ds.coords["lat_b"] = (["y", "x", "nv"], lat_b.data, {"units": "degrees_north"})
         ds.coords["lon_b"] = (["y", "x", "nv"], lon_b.data, {"units": "degrees_east"})
 
@@ -647,9 +665,14 @@ def create_grid_from_ioapi(
     Supports GDTYP:
     - 1: Lat-Lon
     - 2: Lambert Conformal
-    - 5: Polar Stereographic
-    - 6: Albers Equal Area
-    - 7: Mercator
+    - 3: Mercator
+    - 4: Stereographic
+    - 5: UTM
+    - 6: Polar Stereographic
+    - 7: Equatorial Mercator
+    - 8: Transverse Mercator
+    - 9: Albers Equal Area
+    - 10: Lambert Azimuthal Equal Area / Sinusoidal
 
     Parameters
     ----------
@@ -680,25 +703,48 @@ def create_grid_from_ioapi(
 
     if gdtyp == 1:  # Lat-Lon
         crs = "EPSG:4326"
-        # In IOAPI Lat-Lon, XORIG/YORIG are degrees, XCELL/YCELL are degrees
     elif gdtyp == 2:  # Lambert Conformal
         crs = (
             f"+proj=lcc +lat_1={p_alp} +lat_2={p_bet} +lat_0={ycent} "
             f"+lon_0={xcent} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
         )
-    elif gdtyp == 5:  # Polar Stereographic
+    elif gdtyp == 3:  # Mercator
         crs = (
-            f"+proj=stere +lat_0={ycent} +lat_ts={p_alp} +lon_0={xcent} "
-            f"+k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+            f"+proj=merc +lat_ts={p_alp} +lon_0={xcent} +lat_0={ycent} "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
         )
-    elif gdtyp == 6:  # Albers Equal Area
+    elif gdtyp == 4:  # Stereographic
+        crs = (
+            f"+proj=stere +lat_ts={p_alp} +lat_0={ycent} +lon_0={xcent} "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 5:  # UTM
+        crs = f"+proj=utm +zone={int(p_alp)} +datum=WGS84 +units=m +no_defs"
+    elif gdtyp == 6:  # Polar Stereographic
+        # lat_0 determined by p_alp (1.0 for North, -1.0 for South)
+        lat_0 = 90.0 if p_alp > 0 else -90.0
+        crs = (
+            f"+proj=stere +lat_0={lat_0} +lat_ts={p_bet} +lon_0={xcent} "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 7:  # Equatorial Mercator
+        crs = (
+            f"+proj=merc +lat_ts={p_alp} +lon_0={xcent} +lat_0=0 "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 8:  # Transverse Mercator
+        crs = (
+            f"+proj=tmerc +lat_0={ycent} +k={p_bet} +lon_0={xcent} "
+            f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+        )
+    elif gdtyp == 9:  # Albers Equal Area
         crs = (
             f"+proj=aea +lat_1={p_alp} +lat_2={p_bet} +lat_0={ycent} "
             f"+lon_0={xcent} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
         )
-    elif gdtyp == 7:  # Mercator
+    elif gdtyp == 10:  # Lambert Azimuthal Equal Area
         crs = (
-            f"+proj=merc +lat_ts={p_alp} +lon_0={xcent} "
+            f"+proj=laea +lat_0={ycent} +lon_0={xcent} "
             f"+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
         )
     else:
@@ -767,6 +813,11 @@ def create_grid_like(
     else:
         res_x, res_y = map(float, res)
 
+    obj_name = getattr(obj, "name", "input")
+    history_msg_base = f"Created grid like {obj_name} using xregrid."
+    if hasattr(obj, "attrs") and "history" in obj.attrs:
+        history_msg_base += f"\nTemplate history:\n{obj.attrs['history']}"
+
     if extent is not None:
         if crs_obj is None or (
             hasattr(crs_obj, "is_geographic") and crs_obj.is_geographic
@@ -780,10 +831,7 @@ def create_grid_like(
                 add_bounds=add_bounds,
                 chunks=chunks,
                 crs=crs_obj.to_wkt() if hasattr(crs_obj, "to_wkt") else "EPSG:4326",
-                history_msg=(
-                    f"Created grid like {obj.name if hasattr(obj, 'name') else 'input'} "
-                    "using xregrid (Override Extent)."
-                ),
+                history_msg=history_msg_base + " (Override Extent).",
             )
         else:
             # Projected
@@ -802,19 +850,18 @@ def create_grid_like(
             y_b = obj.cf.get_bounds("projection_y_coordinate")
 
             # Batch compute if lazy to minimize roundtrips
-            if hasattr(x_b.data, "dask") or hasattr(y_b.data, "dask"):
-                try:
-                    import dask
-
-                    vals = dask.compute(x_b.min(), x_b.max(), y_b.min(), y_b.max())
-                    extent = tuple(map(float, vals))
-                except ImportError:
-                    extent = (
-                        float(x_b.min()),
-                        float(x_b.max()),
-                        float(y_b.min()),
-                        float(y_b.max()),
-                    )
+            if dask is not None and (
+                hasattr(x_b.data, "dask") or hasattr(y_b.data, "dask")
+            ):
+                vals = dask.compute(x_b.min(), x_b.max(), y_b.min(), y_b.max())
+                extent = tuple(map(float, vals))
+            elif hasattr(x_b.data, "dask") or hasattr(y_b.data, "dask"):
+                extent = (
+                    float(x_b.min()),
+                    float(x_b.max()),
+                    float(y_b.min()),
+                    float(y_b.max()),
+                )
             else:
                 extent = (
                     float(x_b.min()),
@@ -825,51 +872,56 @@ def create_grid_like(
         except Exception:
             # Fallback to centers
             # Discovery logic: we need min/max and average diff for heuristic
-            if hasattr(x_da.data, "dask") or hasattr(y_da.data, "dask"):
-                try:
-                    import dask
+            if dask is not None and (
+                hasattr(x_da.data, "dask") or hasattr(y_da.data, "dask")
+            ):
+                # Batch everything!
+                tasks_dict = {
+                    "x_min": x_da.min(),
+                    "x_max": x_da.max(),
+                    "y_min": y_da.min(),
+                    "y_max": y_da.max(),
+                }
+                if x_da.size > 1:
+                    tasks_dict["res_x"] = abs(x_da.diff(x_da.dims[0]).mean())
+                if y_da.size > 1:
+                    tasks_dict["res_y"] = abs(y_da.diff(y_da.dims[0]).mean())
 
-                    # Batch everything!
-                    tasks = [x_da.min(), x_da.max(), y_da.min(), y_da.max()]
-                    if x_da.size > 1:
-                        tasks.append(abs(x_da.diff(x_da.dims[0]).mean()))
-                    if y_da.size > 1:
-                        tasks.append(abs(y_da.diff(y_da.dims[0]).mean()))
+                results = dask.compute(tasks_dict)[0]
+                x_min, x_max, y_min, y_max = (
+                    float(results["x_min"]),
+                    float(results["x_max"]),
+                    float(results["y_min"]),
+                    float(results["y_max"]),
+                )
 
-                    results = dask.compute(*tasks)
-                    x_min, x_max, y_min, y_max = map(float, results[:4])
+                res_x_orig = float(results.get("res_x", 0))
+                res_y_orig = float(
+                    results.get("res_y", res_x_orig if res_x_orig else 0)
+                )
 
-                    res_x_orig = float(results[4]) if x_da.size > 1 else 0
-                    res_y_orig = (
-                        float(results[5])
-                        if y_da.size > 1
-                        else (res_x_orig if y_da.size == 1 else 0)
-                    )
-
-                    extent = (
-                        x_min - res_x_orig / 2,
-                        x_max + res_x_orig / 2,
-                        y_min - res_y_orig / 2,
-                        y_max + res_y_orig / 2,
-                    )
-                except ImportError:
-                    # Non-batched fallback
-                    res_x_orig = (
-                        abs(float(x_da.diff(x_da.dims[0]).mean()))
-                        if x_da.size > 1
-                        else 0
-                    )
-                    res_y_orig = (
-                        abs(float(y_da.diff(y_da.dims[0]).mean()))
-                        if y_da.size > 1
-                        else res_x_orig
-                    )
-                    extent = (
-                        float(x_da.min()) - res_x_orig / 2,
-                        float(x_da.max()) + res_x_orig / 2,
-                        float(y_da.min()) - res_y_orig / 2,
-                        float(y_da.max()) + res_y_orig / 2,
-                    )
+                extent = (
+                    x_min - res_x_orig / 2,
+                    x_max + res_x_orig / 2,
+                    y_min - res_y_orig / 2,
+                    y_max + res_y_orig / 2,
+                )
+            elif hasattr(x_da.data, "dask") or hasattr(y_da.data, "dask"):
+                # Non-batched fallback
+                res_x_orig = (
+                    abs(float(x_da.diff(x_da.dims[0]).mean())) if x_da.size > 1 else 0
+                )
+                res_y_orig = (
+                    abs(float(y_da.diff(y_da.dims[0]).mean()))
+                    if y_da.size > 1
+                    else res_x_orig
+                )
+                extent = (
+                    float(x_da.min()) - res_x_orig / 2,
+                    float(x_da.max()) + res_x_orig / 2,
+                    float(y_da.min()) - res_y_orig / 2,
+                    float(y_da.max()) + res_y_orig / 2,
+                )
             else:
                 res_x_orig = (
                     abs(float(x_da.diff(x_da.dims[0]).mean())) if x_da.size > 1 else 0
@@ -908,69 +960,74 @@ def create_grid_like(
             lat_b = obj.cf.get_bounds("latitude")
             lon_b = obj.cf.get_bounds("longitude")
 
-            if hasattr(lat_b.data, "dask") or hasattr(lon_b.data, "dask"):
-                try:
-                    import dask
-
-                    vals = dask.compute(
-                        lat_b.min(), lat_b.max(), lon_b.min(), lon_b.max()
-                    )
-                    lat_range = (float(vals[0]), float(vals[1]))
-                    lon_range = (float(vals[2]), float(vals[3]))
-                except ImportError:
-                    lat_range = (float(lat_b.min()), float(lat_b.max()))
-                    lon_range = (float(lon_b.min()), float(lon_b.max()))
+            if dask is not None and (
+                hasattr(lat_b.data, "dask") or hasattr(lon_b.data, "dask")
+            ):
+                vals = dask.compute(lat_b.min(), lat_b.max(), lon_b.min(), lon_b.max())
+                lat_range = (float(vals[0]), float(vals[1]))
+                lon_range = (float(vals[2]), float(vals[3]))
+            elif hasattr(lat_b.data, "dask") or hasattr(lon_b.data, "dask"):
+                lat_range = (float(lat_b.min()), float(lat_b.max()))
+                lon_range = (float(lon_b.min()), float(lon_b.max()))
             else:
                 lat_range = (float(lat_b.min()), float(lat_b.max()))
                 lon_range = (float(lon_b.min()), float(lon_b.max()))
         except Exception:
             # Heuristic for resolution to calculate extent from centers
-            if hasattr(lat_da.data, "dask") or hasattr(lon_da.data, "dask"):
-                try:
-                    import dask
+            if dask is not None and (
+                hasattr(lat_da.data, "dask") or hasattr(lon_da.data, "dask")
+            ):
+                tasks_dict = {
+                    "lat_min": lat_da.min(),
+                    "lat_max": lat_da.max(),
+                    "lon_min": lon_da.min(),
+                    "lon_max": lon_da.max(),
+                }
+                if lat_da.size > 1:
+                    tasks_dict["res_lat"] = abs(lat_da.diff(lat_da.dims[0]).mean())
+                if lon_da.size > 1:
+                    tasks_dict["res_lon"] = abs(lon_da.diff(lon_da.dims[-1]).mean())
 
-                    tasks = [lat_da.min(), lat_da.max(), lon_da.min(), lon_da.max()]
-                    if lat_da.size > 1:
-                        tasks.append(abs(lat_da.diff(lat_da.dims[0]).mean()))
-                    if lon_da.size > 1:
-                        tasks.append(abs(lon_da.diff(lon_da.dims[-1]).mean()))
+                results = dask.compute(tasks_dict)[0]
+                lat_min, lat_max, lon_min, lon_max = (
+                    float(results["lat_min"]),
+                    float(results["lat_max"]),
+                    float(results["lon_min"]),
+                    float(results["lon_max"]),
+                )
 
-                    results = dask.compute(*tasks)
-                    lat_min, lat_max, lon_min, lon_max = map(float, results[:4])
-                    res_lat_orig = float(results[4]) if lat_da.size > 1 else 0
-                    res_lon_orig = (
-                        float(results[5])
-                        if lon_da.size > 1
-                        else (res_lat_orig if lon_da.size == 1 else 0)
-                    )
+                res_lat_orig = float(results.get("res_lat", 0))
+                res_lon_orig = float(
+                    results.get("res_lon", res_lat_orig if res_lat_orig else 0)
+                )
 
-                    lat_range = (
-                        lat_min - res_lat_orig / 2,
-                        lat_max + res_lat_orig / 2,
-                    )
-                    lon_range = (
-                        lon_min - res_lon_orig / 2,
-                        lon_max + res_lon_orig / 2,
-                    )
-                except ImportError:
-                    res_lat_orig = (
-                        abs(float(lat_da.diff(lat_da.dims[0]).mean()))
-                        if lat_da.size > 1
-                        else 0
-                    )
-                    res_lon_orig = (
-                        abs(float(lon_da.diff(lon_da.dims[-1]).mean()))
-                        if lon_da.size > 1
-                        else res_lat_orig
-                    )
-                    lat_range = (
-                        float(lat_da.min()) - res_lat_orig / 2,
-                        float(lat_da.max()) + res_lat_orig / 2,
-                    )
-                    lon_range = (
-                        float(lon_da.min()) - res_lon_orig / 2,
-                        float(lon_da.max()) + res_lon_orig / 2,
-                    )
+                lat_range = (
+                    lat_min - res_lat_orig / 2,
+                    lat_max + res_lat_orig / 2,
+                )
+                lon_range = (
+                    lon_min - res_lon_orig / 2,
+                    lon_max + res_lon_orig / 2,
+                )
+            elif hasattr(lat_da.data, "dask") or hasattr(lon_da.data, "dask"):
+                res_lat_orig = (
+                    abs(float(lat_da.diff(lat_da.dims[0]).mean()))
+                    if lat_da.size > 1
+                    else 0
+                )
+                res_lon_orig = (
+                    abs(float(lon_da.diff(lon_da.dims[-1]).mean()))
+                    if lon_da.size > 1
+                    else res_lat_orig
+                )
+                lat_range = (
+                    float(lat_da.min()) - res_lat_orig / 2,
+                    float(lat_da.max()) + res_lat_orig / 2,
+                )
+                lon_range = (
+                    float(lon_da.min()) - res_lon_orig / 2,
+                    float(lon_da.max()) + res_lon_orig / 2,
+                )
             else:
                 res_lat_orig = (
                     abs(float(lat_da.diff(lat_da.dims[0]).mean()))
@@ -999,10 +1056,7 @@ def create_grid_like(
             add_bounds=add_bounds,
             chunks=chunks,
             crs=crs_obj.to_wkt() if crs_obj else "EPSG:4326",
-            history_msg=(
-                f"Created grid like {obj.name if hasattr(obj, 'name') else 'input'} "
-                "using xregrid."
-            ),
+            history_msg=history_msg_base,
         )
     except (KeyError, AttributeError, ValueError):
         raise ValueError(
@@ -1195,3 +1249,129 @@ def get_rdhpcs_cluster(
         )
 
     return SLURMCluster(**defaults)
+
+
+def spatial_slice(
+    obj: Union[xr.DataArray, xr.Dataset],
+    extent: Tuple[float, float, float, float],
+    crs: Optional[Union[str, int, Any]] = None,
+    buffer: float = 0.0,
+) -> Union[xr.DataArray, xr.Dataset]:
+    """
+    Slice an xarray object to a spatial extent, handling longitude wrapping.
+
+    This function identifies spatial dimensions via cf-xarray and performs
+    a backend-agnostic slice. For geographic coordinates, it robustly
+    handles longitude wrapping (e.g., slicing a 0-360 grid with a -20 to 20 extent).
+
+    Parameters
+    ----------
+    obj : xr.DataArray or xr.Dataset
+        The input object to slice.
+    extent : tuple of float
+        Spatial extent as (min_x, max_x, min_y, max_y).
+    crs : str, int, or pyproj.CRS, optional
+        The CRS of the provided extent. If None, assumes the same CRS as obj.
+    buffer : float, default 0.0
+        Extra buffer to add around the extent in coordinate units.
+
+    Returns
+    -------
+    xr.DataArray or xr.Dataset
+        The spatially sliced object.
+
+    Notes
+    -----
+    For longitude wrapping, if the requested extent crosses the grid's
+    discontinuity, the result will be concatenated along the longitude dimension.
+    """
+    # 1. Coordinate and Dimension Discovery
+    lat_da = _find_coord(obj, "latitude")
+    lon_da = _find_coord(obj, "longitude")
+
+    if lat_da is None or lon_da is None:
+        try:
+            x_da = obj.cf["projection_x_coordinate"]
+            y_da = obj.cf["projection_y_coordinate"]
+            is_geographic = False
+        except (KeyError, AttributeError):
+            raise ValueError(
+                "Could not detect spatial coordinates (lat/lon or x/y) for slicing. "
+                "Ensure your data has CF-compliant coordinates."
+            )
+    else:
+        x_da, y_da = lon_da, lat_da
+        is_geographic = True
+
+    # 2. CRS Transformation
+    if crs is not None:
+        if pyproj is None:
+            raise ImportError(
+                "pyproj is required for CRS-aware slicing. "
+                "Install it with `pip install pyproj`."
+            )
+        target_crs = get_crs_info(obj) or pyproj.CRS("EPSG:4326")
+        transformer = pyproj.Transformer.from_crs(crs, target_crs, always_xy=True)
+
+        # Transform bbox by checking 4 corners
+        x_pts = [extent[0], extent[1], extent[1], extent[0]]
+        y_pts = [extent[2], extent[2], extent[3], extent[3]]
+        xx, yy = transformer.transform(x_pts, y_pts)
+        extent = (min(xx), max(xx), min(yy), max(yy))
+
+    min_x, max_x, min_y, max_y = extent
+    min_x -= buffer
+    max_x += buffer
+    min_y -= buffer
+    max_y += buffer
+
+    # 3. Y-Slicing (Latitude or Projection Y)
+    y_dim = y_da.dims[0]
+    if obj.indexes[y_dim].is_monotonic_increasing:
+        obj = obj.sel({y_dim: slice(min_y, max_y)})
+    else:
+        obj = obj.sel({y_dim: slice(max_y, min_y)})
+
+    # 4. X-Slicing (Longitude or Projection X)
+    x_dim = x_da.dims[0]
+    if not is_geographic:
+        # Standard slice for projected coordinates
+        if obj.indexes[x_dim].is_monotonic_increasing:
+            obj = obj.sel({x_dim: slice(min_x, max_x)})
+        else:
+            obj = obj.sel({x_dim: slice(max_x, min_x)})
+        return obj
+
+    # 5. Longitude Wrapping Logic
+    # Get grid convention from eager indexes
+    lon_grid = obj.indexes[x_dim]
+    g_min = lon_grid.min()
+
+    # Normalize extent to [g_min, g_min + 360]
+    norm_min_x = (min_x - g_min) % 360 + g_min
+    norm_max_x = (max_x - g_min) % 360 + g_min
+
+    # Detect if we need a wrapped slice
+    if norm_min_x > norm_max_x:
+        # Crosses the grid boundary
+        if lon_grid.is_monotonic_increasing:
+            part1 = obj.sel({x_dim: slice(norm_min_x, g_min + 360)})
+            part2 = obj.sel({x_dim: slice(g_min, norm_max_x)})
+        else:
+            part1 = obj.sel({x_dim: slice(g_min + 360, norm_min_x)})
+            part2 = obj.sel({x_dim: slice(norm_max_x, g_min)})
+
+        # Concatenate parts
+        res = xr.concat([part1, part2], dim=x_dim)
+    else:
+        # Simple non-wrapped slice
+        if lon_grid.is_monotonic_increasing:
+            res = obj.sel({x_dim: slice(norm_min_x, norm_max_x)})
+        else:
+            res = obj.sel({x_dim: slice(norm_max_x, norm_min_x)})
+
+    # Metadata update
+    msg = f"Spatially sliced to extent {extent} (wrapped={norm_min_x > norm_max_x})"
+    update_history(res, msg)
+
+    return res
